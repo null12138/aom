@@ -171,6 +171,7 @@ def submit_run(args: argparse.Namespace) -> int:
             api_base=brain_cfg["api_base"],
             max_wait=args.max_wait,
             settings_override=overrides,
+            use_proxy=_as_bool(brain_cfg.get("use_proxy", False), False),
         )
     except Exception as exc:
         print(f"brain adapter error: {exc}")
@@ -252,6 +253,7 @@ def submit_backfill(args: argparse.Namespace) -> int:
             username=brain_cfg["username"],
             password=brain_cfg["password"],
             api_base=brain_cfg["api_base"],
+            use_proxy=_as_bool(brain_cfg.get("use_proxy", False), False),
         )
     except Exception as exc:
         print(f"brain adapter error: {exc}")
@@ -278,7 +280,21 @@ def _should_stream(path: Path) -> bool:
         return False
 
 
-def _load_brain_config() -> Dict[str, str]:
+def _as_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _load_brain_config() -> Dict[str, object]:
     cfg, _ = load_config()
     brain = cfg.get("brain", {})
     if not isinstance(brain, dict):
@@ -286,10 +302,12 @@ def _load_brain_config() -> Dict[str, str]:
     username = brain.get("username")
     password = brain.get("password")
     api_base = brain.get("api_base") or ""
+    use_proxy = brain.get("use_proxy", False)
     if not username or not password:
         raise ConfigError("brain username/password missing in config")
     return {
         "username": str(username),
         "password": str(password),
         "api_base": api_base or "https://api.worldquantbrain.com",
+        "use_proxy": _as_bool(use_proxy, False),
     }

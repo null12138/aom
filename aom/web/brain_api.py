@@ -8,6 +8,20 @@ from ..config import ConfigError, load_config
 from ..api.brain import BrainClient, BrainAuthError
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def load_brain_config() -> Dict[str, Any]:
     cfg, _ = load_config()
     brain = cfg.get("brain", {})
@@ -19,6 +33,9 @@ def load_brain_config() -> Dict[str, Any]:
     password = brain.get("password")
     if not username or not password:
         raise ConfigError("brain username/password missing in config")
+
+    use_proxy = _as_bool(brain.get("use_proxy"), False)
+    llm_use_proxy = _as_bool(brain.get("llm_use_proxy"), use_proxy)
     
     # 返回所有 brain 块下的配置（包含 openai_api_key, gemini_api_key 等）
     return {
@@ -26,6 +43,8 @@ def load_brain_config() -> Dict[str, Any]:
         **brain,
         "username": str(username),
         "password": str(password),
+        "use_proxy": use_proxy,
+        "llm_use_proxy": llm_use_proxy,
     }
 
 
@@ -55,8 +74,9 @@ def fetch_datafield_types(
     region: str,
     delay: int,
     universe: str,
+    use_proxy: bool = False,
 ) -> list[str]:
-    client = BrainClient(username=username, password=password, api_base=api_base)
+    client = BrainClient(username=username, password=password, api_base=api_base, use_proxy=use_proxy)
     try:
         client.login()
     except BrainAuthError as exc:
@@ -97,8 +117,9 @@ def fetch_datafields_preview(
     universe: str,
     dataset_id: str,
     max_count: int = 500,
+    use_proxy: bool = False,
 ) -> list[Dict[str, Any]]:
-    client = BrainClient(username=username, password=password, api_base=api_base)
+    client = BrainClient(username=username, password=password, api_base=api_base, use_proxy=use_proxy)
     try:
         client.login()
     except BrainAuthError as exc:
@@ -179,6 +200,7 @@ def fetch_datafields_preview_multi(
     universe: str,
     dataset_ids: list[str],
     max_count: int = 500,
+    use_proxy: bool = False,
 ) -> list[Dict[str, Any]]:
     seen: set[str] = set()
     merged: list[Dict[str, Any]] = []
@@ -199,6 +221,7 @@ def fetch_datafields_preview_multi(
             universe=universe,
             dataset_id=dataset_id,
             max_count=remaining,
+            use_proxy=use_proxy,
         )
         for item in results:
             key = str(item.get("id") or "")
@@ -221,8 +244,9 @@ def fetch_datasets(
     region: str,
     delay: int,
     universe: str,
+    use_proxy: bool = False,
 ) -> list[Dict[str, Any]]:
-    client = BrainClient(username=username, password=password, api_base=api_base)
+    client = BrainClient(username=username, password=password, api_base=api_base, use_proxy=use_proxy)
     try:
         client.login()
     except BrainAuthError as exc:

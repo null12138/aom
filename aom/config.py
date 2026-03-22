@@ -17,15 +17,33 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
 def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     brain = cfg.setdefault("brain", {})
     username = os.getenv("AOM_BRAIN_USERNAME")
     password = os.getenv("AOM_BRAIN_PASSWORD")
     api_base = os.getenv("AOM_BRAIN_API_BASE")
+    use_proxy = os.getenv("AOM_BRAIN_USE_PROXY")
+    if use_proxy is None:
+        use_proxy = os.getenv("AOM_USE_PROXY")
     gemini_key = os.getenv("AOM_GEMINI_API_KEY")
     openai_key = os.getenv("AOM_OPENAI_API_KEY")
     openai_base = os.getenv("AOM_OPENAI_API_BASE")
     openai_model = os.getenv("AOM_OPENAI_MODEL")
+    llm_use_proxy = os.getenv("AOM_LLM_USE_PROXY")
     llm_request_timeout = os.getenv("AOM_LLM_REQUEST_TIMEOUT")
     llm_max_retries = os.getenv("AOM_LLM_MAX_RETRIES")
     llm_retry_backoff = os.getenv("AOM_LLM_RETRY_BACKOFF")
@@ -36,6 +54,9 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         brain["password"] = password
     if api_base:
         brain["api_base"] = api_base
+    parsed_use_proxy = _parse_bool(use_proxy)
+    if parsed_use_proxy is not None:
+        brain["use_proxy"] = parsed_use_proxy
     if gemini_key:
         brain["gemini_api_key"] = gemini_key
     if openai_key:
@@ -44,6 +65,9 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         brain["openai_api_base"] = openai_base
     if openai_model:
         brain["openai_model"] = openai_model
+    parsed_llm_use_proxy = _parse_bool(llm_use_proxy)
+    if parsed_llm_use_proxy is not None:
+        brain["llm_use_proxy"] = parsed_llm_use_proxy
     if llm_request_timeout:
         brain["llm_request_timeout"] = llm_request_timeout
     if llm_max_retries:

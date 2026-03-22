@@ -71,6 +71,20 @@ from .ai_api import (
 DREAM_ALPHA_DAEMON = DreamAlphaDaemon()
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     server = ThreadingHTTPServer((host, port), AOMHandler)
     print(f"AOM Web UI running on http://{host}:{port}")
@@ -338,6 +352,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 password=brain["password"],
                 api_base=brain["api_base"],
                 max_wait=int(payload.get("max_wait", 1800)),
+                use_proxy=_as_bool(brain.get("use_proxy"), False),
             )
 
             if ordered:
@@ -403,6 +418,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 username=brain["username"],
                 password=brain["password"],
                 api_base=brain["api_base"],
+                use_proxy=_as_bool(brain.get("use_proxy"), False),
             )
             updated = backfill_state(state, adapter=adapter, force=bool(payload.get("force")))
             save_state(state_path, state)
@@ -456,6 +472,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                         universe=universe,
                         dataset_ids=dataset_ids,
                         max_count=limit,
+                        use_proxy=_as_bool(brain.get("use_proxy"), False),
                     )
                 else:
                     dataset_id = payload.get("dataset_id") or ""
@@ -469,6 +486,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                         universe=universe,
                         dataset_id=dataset_id,
                         max_count=limit,
+                        use_proxy=_as_bool(brain.get("use_proxy"), False),
                     )
             except Exception as exc:
                 if use_cache:
@@ -502,6 +520,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 region=region,
                 delay=delay,
                 universe=universe,
+                use_proxy=_as_bool(brain.get("use_proxy"), False),
             )
             save_dataset_cache(cache_key, results)
             return {"count": len(results), "results": results, "cached": False}
@@ -589,6 +608,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 region=region,
                 delay=delay,
                 universe=universe,
+                use_proxy=_as_bool(brain.get("use_proxy"), False),
             )
             out_path = payload.get("out")
             if out_path:
@@ -637,6 +657,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 "seed_file": str(resolve_path(payload.get("seed_file") or "runs/dream_alpha_seed_library.json")),
                 "high_template_file": str(resolve_path(payload.get("high_template_file") or "runs/dream_alpha_high_templates.jsonl")),
                 "field_meta_cache_file": str(resolve_path(payload.get("field_meta_cache_file") or "metadata/field_meta_cache.json")),
+                "use_proxy": payload.get("use_proxy", brain.get("use_proxy", False)),
             }
             return DREAM_ALPHA_DAEMON.start(cfg)
 
@@ -656,9 +677,12 @@ class AOMHandler(BaseHTTPRequestHandler):
             file_path = resolve_path(payload["file"])
             if not file_path.exists():
                 raise ValueError("file not found")
+            use_proxy = _as_bool(payload.get("use_proxy"), False)
             
             with file_path.open("rb") as f:
-                resp = requests.post("https://0x0.st", files={"file": f}, timeout=15)
+                with requests.Session() as sess:
+                    sess.trust_env = use_proxy
+                    resp = sess.post("https://0x0.st", files={"file": f}, timeout=15)
             
             if resp.status_code == 200:
                 return {"url": resp.text.strip()}

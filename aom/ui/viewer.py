@@ -121,7 +121,10 @@ class ViewerPane(Vertical):
         
         self.app.call_from_thread(self._set_details, f"正在下载: {url} ...")
         try:
-            resp = requests.get(url, timeout=10)
+            with requests.Session() as sess:
+                # Default: do not use process proxy env vars.
+                sess.trust_env = False
+                resp = sess.get(url, timeout=10)
             data = resp.json()
             # 存入上传目录
             save_path = ROOT_DIR / "runs" / "uploads" / f"remote_{datetime.now().strftime('%H%M%S')}.json"

@@ -12,6 +12,20 @@ import requests
 DEFAULT_API_BASE = "https://api.worldquantbrain.com"
 logger = logging.getLogger("BrainClient")
 
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "on"}:
+            return True
+        if lower in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
 class BrainApiError(RuntimeError):
     def __init__(self, message, status_code=None):
         super().__init__(message)
@@ -26,11 +40,21 @@ class SimulationOutcome:
     result: Dict[str, Any]
 
 class BrainClient:
-    def __init__(self, username: str, password: str, api_base: str = DEFAULT_API_BASE, timeout: int = 30):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        api_base: str = DEFAULT_API_BASE,
+        timeout: int = 30,
+        use_proxy: bool = False,
+    ):
         self.username = username
         self.password = password
         self.api_base = api_base or DEFAULT_API_BASE
         self.session = requests.Session()
+        self.use_proxy = _as_bool(use_proxy, False)
+        # Default: do not read HTTP(S)_PROXY/ALL_PROXY from environment.
+        self.session.trust_env = self.use_proxy
         self.timeout = timeout
         self._login_lock = threading.Lock()
 
@@ -212,4 +236,3 @@ class BrainClient:
         # requests will handle dict in params= correctly
         resp = self._request("GET", f"{self.api_base}/data-fields", params=params)
         return resp.json()
-

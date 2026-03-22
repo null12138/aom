@@ -478,6 +478,8 @@ class DreamAlphaDaemon:
 
     def _normalize_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(cfg or {})
+        brain_cfg = out.get("brain") if isinstance(out.get("brain"), dict) else {}
+        out["brain"] = brain_cfg
         out["generation_count"] = max(1, _to_int(out.get("generation_count"), 5))
         out["interval_sec"] = max(5, _to_int(out.get("interval_sec"), 30))
         out["max_wait_sec"] = max(60, _to_int(out.get("max_wait_sec"), 1800))
@@ -503,7 +505,10 @@ class DreamAlphaDaemon:
         out["seed_file"] = str(out.get("seed_file") or "runs/dream_alpha_seed_library.json")
         out["high_template_file"] = str(out.get("high_template_file") or "runs/dream_alpha_high_templates.jsonl")
         out["field_meta_cache_file"] = str(out.get("field_meta_cache_file") or "metadata/field_meta_cache.json")
-        out["brain"] = out.get("brain") if isinstance(out.get("brain"), dict) else {}
+        use_proxy_raw = out.get("use_proxy")
+        if use_proxy_raw is None:
+            use_proxy_raw = brain_cfg.get("use_proxy")
+        out["use_proxy"] = _to_bool(use_proxy_raw, False)
         return out
 
     def _normalize_seed_exprs(self, raw: Any) -> List[str]:
@@ -570,6 +575,7 @@ class DreamAlphaDaemon:
             "cursor_file": cfg["cursor_file"],
             "high_template_file": cfg["high_template_file"],
             "field_meta_cache_file": cfg["field_meta_cache_file"],
+            "use_proxy": cfg["use_proxy"],
             "fields_count": len(cfg.get("fields") or []),
             "context": cfg.get("context") or {},
             "notify_url_set": bool(cfg.get("notify_url")),
@@ -628,19 +634,16 @@ class DreamAlphaDaemon:
             return
 
         errors: List[str] = []
-        # 1) default env (may use system proxy), 2) direct no-proxy, 3) direct retry
-        modes = ("env", "direct", "direct")
+        # Default: direct/no-proxy. If explicitly enabled, try env-proxy first.
+        use_proxy = _to_bool(self._cfg.get("use_proxy"), False)
+        modes = ("env", "direct", "direct") if use_proxy else ("direct", "direct")
         for idx, mode in enumerate(modes):
             if idx > 0:
                 time.sleep(0.6 * idx)
             try:
-                if mode == "env":
-                    resp = requests.get(final_url, timeout=(5, 10))
-                else:
-                    sess = requests.Session()
-                    sess.trust_env = False
+                with requests.Session() as sess:
+                    sess.trust_env = (mode == "env")
                     resp = sess.get(final_url, timeout=(5, 10))
-                    sess.close()
                 if resp.status_code // 100 == 2:
                     return
                 errors.append(f"{mode}: http {resp.status_code}")
@@ -1015,7 +1018,12 @@ class DreamAlphaDaemon:
             auth_refresh_interval_sec = int(cfg.get("auth_refresh_interval_sec", 900))
             operators_refresh_interval_sec = int(cfg.get("operators_refresh_interval_sec", 1800))
 
-            client = BrainClient(username=username, password=password, api_base=api_base)
+            client = BrainClient(
+                username=username,
+                password=password,
+                api_base=api_base,
+                use_proxy=cfg.get("use_proxy", False),
+            )
 
             self._notify(
                 "START",
@@ -1416,7 +1424,12 @@ class DreamAlphaDaemon:
 
                     def _simulate_task(task: Dict[str, Any]) -> Dict[str, Any]:
                         expr = str(task.get("expression") or "")
-                        worker_client = BrainClient(username=username, password=password, api_base=api_base)
+                        worker_client = BrainClient(
+                            username=username,
+                            password=password,
+                            api_base=api_base,
+                            use_proxy=cfg.get("use_proxy", False),
+                        )
                         outcome = worker_client.simulate(
                             task.get("sim_payload") or {},
                             max_wait=max_wait_sec,

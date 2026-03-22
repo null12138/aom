@@ -81,7 +81,12 @@ def _enrich_fields_with_api(
     settings = _extract_context_settings(context)
     context_key = build_field_meta_context_key(context)
     local_cache = LocalFieldMetaCache(cache_file)
-    client = BrainClient(brain_cfg["username"], brain_cfg["password"], brain_cfg["api_base"])
+    client = BrainClient(
+        brain_cfg["username"],
+        brain_cfg["password"],
+        brain_cfg["api_base"],
+        use_proxy=brain_cfg.get("use_proxy", False),
+    )
     client.login()
 
     out: List[Dict[str, Any]] = []
@@ -185,7 +190,12 @@ async def get_real_operators() -> List[Dict[str, Any]]:
     
     try:
         cfg = load_brain_config()
-        client = BrainClient(cfg["username"], cfg["password"], cfg["api_base"])
+        client = BrainClient(
+            cfg["username"],
+            cfg["password"],
+            cfg["api_base"],
+            use_proxy=cfg.get("use_proxy", False),
+        )
         client.login()
         ops = _normalize_operators_payload(client.get_operators())
         if ops:

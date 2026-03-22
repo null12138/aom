@@ -265,8 +265,27 @@ class SubmitterPane(Vertical):
         all_files.sort(key=lambda x: x[1].stat().st_mtime, reverse=True)
         return {f"{l}:{p.name}": (f"{l} · {p.name}", p) for l, p in all_files}
 
-    def _load_brain_config(self) -> dict[str, str]:
+    def _load_brain_config(self) -> dict[str, object]:
+        def _as_bool(value: object, default: bool = False) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lower = value.strip().lower()
+                if lower in {"1", "true", "yes", "on"}:
+                    return True
+                if lower in {"0", "false", "no", "off"}:
+                    return False
+            if value is None:
+                return default
+            return bool(value)
+
         try:
             cfg, _ = load_config(); brain = cfg.get("brain", {})
-            return {"username": str(brain.get("username", "")), "password": str(brain.get("password", "")), "api_base": str(brain.get("api_base") or "https://api.worldquantbrain.com")}
-        except: return {"username": "", "password": "", "api_base": ""}
+            return {
+                "username": str(brain.get("username", "")),
+                "password": str(brain.get("password", "")),
+                "api_base": str(brain.get("api_base") or "https://api.worldquantbrain.com"),
+                "use_proxy": _as_bool(brain.get("use_proxy"), False),
+            }
+        except:
+            return {"username": "", "password": "", "api_base": "", "use_proxy": False}

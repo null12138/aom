@@ -20,6 +20,10 @@ class AlphaGenerator:
         self.llm_request_timeout = self._safe_float(config.get("llm_request_timeout", 180), 180.0)
         self.llm_max_retries = max(1, self._safe_int(config.get("llm_max_retries", 3), 3))
         self.llm_retry_backoff = max(0.1, self._safe_float(config.get("llm_retry_backoff", 1.5), 1.5))
+        self.llm_use_proxy = self._safe_bool(config.get("llm_use_proxy", config.get("use_proxy", False)), False)
+        self.http_session = requests.Session()
+        # Default: do not inherit process proxy env vars.
+        self.http_session.trust_env = self.llm_use_proxy
 
     def generate_alphas(
         self, 
@@ -85,7 +89,7 @@ class AlphaGenerator:
         for attempt in range(1, self.llm_max_retries + 1):
             try:
                 # 分离 connect/read timeout，避免连接阶段拖太久
-                resp = requests.post(
+                resp = self.http_session.post(
                     url,
                     headers=headers,
                     json=payload,
@@ -161,6 +165,20 @@ class AlphaGenerator:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lower = value.strip().lower()
+            if lower in {"1", "true", "yes", "on"}:
+                return True
+            if lower in {"0", "false", "no", "off"}:
+                return False
+        if value is None:
+            return default
+        return bool(value)
 
     def _parse_json_response(self, text: str) -> List[Dict[str, Any]]:
         try:

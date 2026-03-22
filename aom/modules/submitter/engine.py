@@ -319,9 +319,9 @@ def run_submitter_multiple(state: Dict[str, Any], adapter: SubmissionAdapter, so
 # --- Adapter Implementations ---
 
 class BrainApiAdapter(SubmissionAdapter):
-    def __init__(self, username, password, api_base, max_wait=1800, settings_override=None):
+    def __init__(self, username, password, api_base, max_wait=1800, settings_override=None, use_proxy=False):
         from ...api.brain import BrainClient
-        self.client = BrainClient(username, password, api_base)
+        self.client = BrainClient(username, password, api_base, use_proxy=use_proxy)
         self.username = username
         self.password = password
         self.max_wait = max_wait
@@ -367,9 +367,9 @@ class BrainApiAdapter(SubmissionAdapter):
             return res
 
 class BrainBackfillAdapter(BackfillAdapter):
-    def __init__(self, username, password, api_base):
+    def __init__(self, username, password, api_base, use_proxy=False):
         from ...api.brain import BrainClient
-        self.client = BrainClient(username, password, api_base)
+        self.client = BrainClient(username, password, api_base, use_proxy=use_proxy)
         self.client.login()
     def backfill(self, item):
         if not item.get("submission_id"): return {}

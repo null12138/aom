@@ -14,6 +14,7 @@ pip install -r requirements.txt
 
 - Edit `config/aom.toml`
 - Or set `AOM_BRAIN_USERNAME` and `AOM_BRAIN_PASSWORD`
+- Proxy is disabled by default. If needed, set `brain.use_proxy=true` or env `AOM_BRAIN_USE_PROXY=true`.
 
 3. Run TUI:
 
