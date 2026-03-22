@@ -24,7 +24,7 @@ python3 -m aom
 Run Web UI:
 
 ```bash
-python3 -m aom web --host 127.0.0.1 --port 8000
+python3 -m aom web --host 0.0.0.0 --port 8000
 ```
 
 Web UI includes an online template editor (load/save/validate) and cache-fill.
@@ -171,7 +171,7 @@ python3 -m aom meta datafields --out metadata/datafields.json --region USA --del
 
 ```bash
 aom config
-aom web --host 127.0.0.1 --port 8000
+aom web --host 0.0.0.0 --port 8000
 aom template init --out templates/demo.json
 aom template expand --template templates/demo.json
 aom factors list --file generated/factors_demo.json

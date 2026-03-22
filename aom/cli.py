@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("tui")
     web_parser = subparsers.add_parser("web", help="start web ui")
-    web_parser.add_argument("--host", default="127.0.0.1", help="bind host")
+    web_parser.add_argument("--host", default="0.0.0.0", help="bind host")
     web_parser.add_argument("--port", type=int, default=8000, help="bind port")
     add_template_subparser(subparsers)
     add_factor_subparser(subparsers)

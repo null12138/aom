@@ -71,7 +71,7 @@ from .ai_api import (
 DREAM_ALPHA_DAEMON = DreamAlphaDaemon()
 
 
-def run(host: str = "127.0.0.1", port: int = 8000) -> None:
+def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     server = ThreadingHTTPServer((host, port), AOMHandler)
     print(f"AOM Web UI running on http://{host}:{port}")
     server.serve_forever()
