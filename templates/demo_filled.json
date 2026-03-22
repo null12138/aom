@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "template_id": "demo",
+  "template": "divide(<x/>, add(1, <y/>))",
+  "fill_rules": {
+    "x": [
+      "eps_growth",
+      "earnings"
+    ],
+    "y": [
+      "rev_q",
+      "sales_q"
+    ]
+  },
+  "metadata": {
+    "priority": 100,
+    "tags": [
+      "demo"
+    ],
+    "settings_override": {}
+  }
+}

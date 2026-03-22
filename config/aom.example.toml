@@ -1,0 +1,27 @@
+[brain]
+api_base = "https://api.worldquantbrain.com"
+username = "your_brain_username@example.com"
+password = "your_brain_password"
+
+# LLM config (set one provider at least)
+openai_api_key = "your_openai_api_key"
+openai_api_base = "https://api.openai.com/v1"
+openai_model = "gpt-5.3-codex"
+llm_request_timeout = 180
+llm_max_retries = 3
+llm_retry_backoff = 1.5
+
+[logging]
+level = "INFO"
+file = ""
+
+[defaults]
+region = "USA"
+universe = "TOP3000"
+delay = 1
+neutralization = "INDUSTRY"
+truncation = 0.08
+pasteurization = "ON"
+nan_handling = "OFF"
+unit_handling = "VERIFY"
+max_trade = "OFF"

@@ -1,0 +1,12 @@
+[project]
+name = "auto-opener-miner"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "textual>=0.70.0",
+  "requests>=2.31.0",
+  "tomli; python_version < '3.11'",
+]
+
+[project.scripts]
+aom = "aom.cli:main"

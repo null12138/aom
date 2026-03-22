@@ -1,0 +1,6 @@
+textual>=0.70.0
+requests>=2.31.0
+tomli; python_version < '3.11'
+# 仅在需要 Web UI 时安装，树莓派建议仅使用 TUI
+# fastapi>=0.100.0
+# uvicorn>=0.23.0

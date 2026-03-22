@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto Opener Miner - Web UI</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Auto Opener Miner <span class="badge">v0.1</span></h1>
+        <p>WorldQuant Brain 一站式因子工程工具</p>
+      </div>
+      <div class="toolbar">
+        <div id="status_badge" class="badge">就绪</div>
+        <button class="btn-outline" data-action="fileRefreshAll">刷新所有文件</button>
+        <button data-action="clearOutput">清空输出</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <div class="tab active" data-tab="template">模板与字段</div>
+      <div class="tab" data-tab="generate">生成因子</div>
+      <div class="tab" data-tab="submit">提交与回填</div>
+      <div class="tab" data-tab="ai">AI 灵感</div>
+      <div class="tab" data-tab="advanced">高级工具</div>
+    </nav>
+
+    <main>
+      <div class="layout">
+        <div class="panel">
+          <section class="tab-panel active" id="tab-template">
+            <h2>模板与字段</h2>
+            <div class="card">
+              <h3>文件管理</h3>
+              <div class="hidden">
+                <select id="file_template"></select>
+                <select id="file_template_library"></select>
+                <select id="file_datafields"></select>
+                <select id="file_settings"></select>
+                <select id="file_operators"></select>
+                <select id="file_factors"></select>
+                <select id="file_state"></select>
+                <select id="file_factor_library"></select>
+              </div>
+
+              <div class="file-manager">
+                <div class="file-kinds" id="file_kind_tabs">
+                  <div class="file-kind active" data-kind="template">模板</div>
+                  <div class="file-kind" data-kind="template_library">模板库</div>
+                  <div class="file-kind" data-kind="datafields">字段缓存</div>
+                  <div class="file-kind" data-kind="settings">设置选项</div>
+                  <div class="file-kind" data-kind="factors">生成结果</div>
+                  <div class="file-kind" data-kind="state">提交状态</div>
+                </div>
+                <div class="file-panel">
+                  <div class="row" style="justify-content: space-between;">
+                    <div class="chip-row" id="file_folder_list"></div>
+                    <button class="btn-secondary" data-action="fileNewFolder">新建目录</button>
+                  </div>
+                  <div id="file_list" class="file-list"></div>
+                  <div class="file-actions">
+                    <button class="btn-secondary" data-action="fileNew">新建</button>
+                    <button class="btn-outline" data-action="fileRename">重命名</button>
+                    <button class="btn-outline" data-action="fileDelete">删除</button>
+                    <button class="btn-outline" data-action="filePreview">预览</button>
+                  </div>
+                  <div class="muted">仅显示文件名，不展示路径。</div>
+                </div>
+                <div class="file-panel">
+                  <div class="muted">当前选择</div>
+                  <div id="file_summary" class="chip-row"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>模板表达式</h3>
+              <div class="grid">
+                <label>当前模板<span id="active_template_label" class="muted"></span></label>
+                <label>模板 ID<input id="template_id" value="demo" /></label>
+              </div>
+              <label style="margin-top: 10px;">表达式<textarea id="template_text" class="editor">divide(&lt;x/&gt;, add(1, &lt;y/&gt;))</textarea></label>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="loadTemplate">加载</button>
+                <button data-action="saveTemplate">保存</button>
+                <button class="btn-secondary" data-action="validateTemplate">校验</button>
+                <label class="muted"><input type="checkbox" id="auto_save" checked /> 自动保存</label>
+                <span class="muted">自动解析 &lt;name/&gt; 占位符</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>模板库</h3>
+              <div class="grid">
+                <label>当前库文件<span id="active_library_label" class="muted"></span></label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="libraryRefresh">刷新列表</button>
+                <button class="btn-secondary" data-action="librarySave">保存当前到库</button>
+              </div>
+              <div id="library_list" class="placeholder-grid" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="card">
+              <h3>占位符字段</h3>
+              <div class="muted">每个占位符可配置多个字段，生成笛卡尔组合。</div>
+              <div id="placeholder_list" class="placeholder-grid"></div>
+            </div>
+
+            <div class="card">
+              <h3>官方字段选择</h3>
+              <div class="muted">使用模板模块同款字段选择器（筛选/排序/批量选择）。</div>
+              <div class="grid" style="margin-top: 10px;">
+                <label>目标占位符<select id="datafields_target"></select></label>
+                <label>字段缓存<span id="active_datafields_label" class="muted"></span></label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="openDataFieldsModal">打开字段选择器</button>
+                <button class="btn-outline" data-action="clearPlaceholderFields">清空当前占位符字段</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="tab-panel" id="tab-generate">
+            <h2>生成因子</h2>
+            <div class="card">
+              <h3>缓存填充</h3>
+              <div class="grid">
+                <label>模板文件<span id="cache_template_label" class="muted"></span></label>
+                <label>输出模板<select id="cache_out"></select></label>
+                <label>字段缓存<span id="cache_datafields_label" class="muted"></span></label>
+                <label>默认数量<input id="cache_limit" type="number" value="30" /></label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="cacheFill">写入模板(缓存填充)</button>
+                <span class="muted">使用当前占位符字段列表</span>
+              </div>
+              <div class="muted" style="margin-top: 8px;">规则预览（只读）</div>
+              <textarea id="cache_rules" readonly></textarea>
+            </div>
+
+            <div class="card">
+              <h3>展开为因子</h3>
+              <div class="grid">
+                <label>模板文件<span id="expand_template_label" class="muted"></span></label>
+                <label>输出因子<select id="expand_out"></select></label>
+                <label>最大组合<input id="expand_max" type="number" placeholder="可空" /></label>
+              </div>
+              <div class="grid" style="margin-top: 10px;">
+                <label>Region<select id="expand_region"></select></label>
+                <label>Universe<select id="expand_universe"></select></label>
+                <label>Delay<select id="expand_delay"></select></label>
+              </div>
+              <details style="margin-top: 10px;">
+                <summary>高级覆盖设置（JSON）</summary>
+                <textarea id="expand_settings">{"region":"USA","delay":1}</textarea>
+              </details>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="expandTemplate">生成因子</button>
+                <button class="btn-outline" data-action="shareTo0x0">分享文件 (0x0.st)</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="tab-panel" id="tab-submit">
+            <h2>提交与回填</h2>
+            <div class="card">
+              <h3>提交器（Brain 强制登录）</h3>
+              <div class="grid">
+                <label>因子文件<select id="submit_file"></select></label>
+                <label>因子库 (DB)<select id="lib_db"></select></label>
+                <label>最大等待秒<input id="submit_max_wait" type="number" value="1800" /></label>
+                <label>并发数<input id="submit_concurrency" type="number" min="1" max="8" value="1" /></label>
+                <label style="flex-direction: row; gap: 8px; align-items: center; margin-top: 20px;">
+                  <input type="checkbox" id="submit_ordered" /> 流式模式 (Ordered)
+                </label>
+                <label style="flex-direction: row; gap: 8px; align-items: center; margin-top: 20px;">
+                  <input type="checkbox" id="submit_retry_failed" /> 重试失败项
+                </label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <input id="submit_upload_input" type="file" accept=".json" style="display:none" />
+                <button class="btn-secondary" data-action="submitUpload">上传因子文件</button>
+                <button class="btn-outline" data-action="submitUseSelection">使用已选文件</button>
+                <span class="muted" id="submit_source_label">来源：选择文件</span>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="submitRun">运行提交</button>
+                <button class="btn-secondary" data-action="submitStatus">查看状态</button>
+                <button class="btn-outline" data-action="submitBackfill">回填结果</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="tab-panel" id="tab-ai">
+            <h2>AI 灵感 (Alpha Architect)</h2>
+            <div class="card">
+              <h3>1. 研报解析 (可选)</h3>
+              <p class="muted">粘贴研报文本或关键词，让 AI 从中提取投资逻辑。</p>
+              <textarea id="ai_report_text" class="editor" style="min-height: 120px;" placeholder="在此处粘贴研报内容..."></textarea>
+            </div>
+
+            <div class="card">
+              <h3>2. 灵感源 (数据字段)</h3>
+              <p class="muted">选择你想要 AI 尝试组合的数据字段。</p>
+              <div class="row">
+                <button class="btn-secondary" data-action="openAiFieldSelector">选择数据字段</button>
+                <span class="muted" id="ai_selected_count">已选 0 个字段</span>
+              </div>
+              <div id="ai_selected_fields" class="chip-row" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="card">
+              <h3>3. AI 生成因子</h3>
+              <div class="row">
+                <label>生成数量 <input type="number" id="ai_gen_count" value="5" min="1" max="10" style="width: 60px;" /></label>
+                <label style="flex-direction: row; gap: 8px;"><input type="checkbox" id="ai_include_patterns" checked /> 包含经典模式</label>
+                <button data-action="aiGenerate">开始 AI 灵感生成</button>
+              </div>
+              <div id="ai_loading" class="loading-message" style="display: none;">AI 正在思考并构建因子...</div>
+              <div id="ai_results" class="ai-results-list" style="margin-top: 16px; display: none;">
+                <!-- AI 生成结果将显示在这里 -->
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>4. 梦到的alpha（后台守护）</h3>
+              <p class="muted">WebUI 仅作控制面板，核心循环在后端持续运行（24h 可用）。</p>
+              <div class="grid">
+                <label>每轮生成数量<input type="number" id="dream_generation_count" value="5" min="1" max="20" /></label>
+                <label>轮询间隔(秒)<input type="number" id="dream_interval_sec" value="30" min="5" max="3600" /></label>
+                <label>单次回测超时(秒)<input type="number" id="dream_max_wait_sec" value="1800" min="60" max="7200" /></label>
+                <label>错误推送冷却(秒)<input type="number" id="dream_error_cooldown_sec" value="180" min="0" max="3600" /></label>
+                <label>认证刷新间隔(秒)<input type="number" id="dream_auth_refresh_sec" value="900" min="60" max="86400" /></label>
+                <label>操作符刷新间隔(秒)<input type="number" id="dream_operator_refresh_sec" value="1800" min="60" max="86400" /></label>
+              </div>
+              <div class="grid" style="margin-top: 10px;">
+                <label>|Sharpe|阈值<input type="number" id="dream_sharpe_abs_threshold" value="1.0" step="0.01" /></label>
+                <label>Fitness 阈值<input type="number" id="dream_fitness_threshold" value="1.0" step="0.01" /></label>
+                <label>高分模板 Sharpe 阈值<input type="number" id="dream_template_sharpe_threshold" value="1.58" step="0.01" /></label>
+                <label>种子注入上限<input type="number" id="dream_max_seed_in_prompt" value="20" min="1" max="100" /></label>
+              </div>
+              <div class="grid" style="margin-top: 10px;">
+                <label>种子库文件<input id="dream_seed_file" value="runs/dream_alpha_seed_library.json" /></label>
+                <label>光标文件<input id="dream_cursor_file" value="runs/dream_alpha_cursor.json" /></label>
+                <label>高分模板日志<input id="dream_high_template_file" value="runs/dream_alpha_high_templates.jsonl" /></label>
+                <label>推送地址<input id="dream_notify_url" value="https://tgpusher.opener.eu.org/" /></label>
+              </div>
+              <div style="margin-top: 10px;">
+                <label>启动时额外种子（每行一个表达式）</label>
+                <textarea id="dream_seed_bootstrap" style="min-height: 90px;" placeholder="rank(ts_delta(close, 5))"></textarea>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="dreamStart">启动守护</button>
+                <button class="btn-secondary" data-action="dreamStatus">刷新状态</button>
+                <button class="btn-outline" data-action="dreamStop">停止守护</button>
+                <span class="muted" id="dream_status_label">状态：未启动</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="tab-panel" id="tab-advanced">
+            <h2>高级工具</h2>
+            <div class="card">
+              <h3>因子库</h3>
+              <div class="grid">
+                <label>库文件<select id="lib_db_adv"></select></label>
+                <label>因子文件<select id="lib_file"></select></label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="libInit">初始化</button>
+                <button class="btn-secondary" data-action="libArchive">归档因子</button>
+                <button class="btn-outline" data-action="libStats">统计</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>元数据下载</h3>
+              <div class="grid">
+                <label>Operators 文件<select id="meta_ops"></select></label>
+                <label>Settings 文件<select id="meta_settings"></select></label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button data-action="metaOperators">Operators</button>
+                <button class="btn-secondary" data-action="metaSettings">Settings</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <aside class="panel">
+          <h2>状态与结果</h2>
+          <div class="card">
+            <h3>当前状态</h3>
+            <div class="summary">
+              <div class="summary-item">占位符：<span id="summary_placeholders">0</span></div>
+              <div class="summary-item">字段总数：<span id="summary_fields">0</span></div>
+              <div class="summary-item">字段缓存：<span id="summary_datafields">0</span></div>
+              <div class="summary-item">模板文件：<span id="summary_template">-</span></div>
+            </div>
+            <div class="row" style="margin-top: 10px;">
+              <button class="btn-outline" data-tab="template">回到模板</button>
+              <button class="btn-outline" data-tab="generate">去生成</button>
+              <button class="btn-outline" data-tab="submit">去提交</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>使用指南</h3>
+            <ol class="muted" style="margin: 0; padding-left: 18px;">
+              <li>在「文件管理」中选择当前模板与字段缓存。</li>
+              <li>编辑模板表达式，系统自动解析 &lt;name/&gt; 占位符。</li>
+              <li>打开字段选择器，筛选字段并加入占位符。</li>
+              <li>在「生成」中缓存填充或展开因子。</li>
+              <li>在「提交」中运行提交并回填结果。</li>
+            </ol>
+          </div>
+
+          <div class="card">
+            <details id="result_panel">
+              <summary>响应结果</summary>
+              <div class="result" id="result">等待操作...</div>
+            </details>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- Modal 移出 main 以防层级问题 -->
+    <div id="dataFieldsModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>获取数据字段（模板模块同款）</h3>
+          <span class="close" data-action="closeDataFieldsModal">&times;</span>
+        </div>
+        <div class="modal-body">
+          <div class="muted" style="margin-bottom: 8px;">当前占位符：<span id="df_target_label">-</span></div>
+          <div class="data-fields-params">
+            <div class="params-row">
+              <div class="param-group">
+                <label>设置选项</label>
+                <div id="df_settings_label" class="muted"></div>
+              </div>
+              <div class="param-group">
+                <label>Instrument</label>
+                <select id="df_instrument"></select>
+              </div>
+              <div class="param-group">
+                <label>Region</label>
+                <select id="df_region"></select>
+              </div>
+              <div class="param-group">
+                <label>Delay</label>
+                <select id="df_delay"></select>
+              </div>
+              <div class="param-group">
+                <label>Universe</label>
+                <select id="df_universe"></select>
+              </div>
+              <div class="param-group">
+                <label>数量上限</label>
+                <input id="df_limit" type="number" value="500" />
+              </div>
+              <div class="param-group">
+                <label>字段缓存</label>
+                <div id="df_out_label" class="muted"></div>
+              </div>
+              <div class="param-group">
+                <div class="muted" id="df_status">设置选项/数据集将自动加载</div>
+              </div>
+              <div class="param-group">
+                <label>缓存</label>
+                <div class="row">
+                  <label class="muted"><input type="checkbox" id="df_use_cache" checked /> 使用缓存</label>
+                  <button class="btn-outline" data-action="clearDatafieldsCache">清空缓存</button>
+                </div>
+              </div>
+              <div class="param-group">
+                <button data-action="loadDataFields">加载字段</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="dataFieldsLoading" class="loading-message" style="display: none;">加载数据字段中...</div>
+          <div class="dataset-panel">
+            <div class="row" style="justify-content: space-between;">
+              <strong>Dataset 选择（多选）</strong>
+              <div id="df_dataset_count" class="badge">已选 0</div>
+            </div>
+            <div id="df_dataset_selected" class="chip-row"></div>
+            <div style="margin-top: 8px;">
+              <input type="text" id="df_dataset_search" placeholder="搜索数据集..." style="width: 100%;" />
+            </div>
+            <div id="df_dataset_panel" class="dataset-list"></div>
+          </div>
+
+          <div id="dataFieldsContent" class="data-fields-content">
+            <div class="data-fields-controls">
+              <div class="filter-label">过滤与筛选:</div>
+              <div class="filter-options">
+                <label><input type="checkbox" id="filterHighCoverage" /> 高覆盖度</label>
+                <label><input type="checkbox" id="filterPopular" /> 高频使用</label>
+                <label><input type="checkbox" id="filterMatrixOnly" /> 仅 MATRIX</label>
+                <select id="typeFilter"></select>
+              </div>
+              <div class="filter-actions">
+                <button id="selectAllFiltered">全选当前</button>
+                <button id="clearAllSelected">清空所有</button>
+              </div>
+            </div>
+
+            <div class="data-fields-main-layout">
+              <div class="data-fields-table-container">
+                <table class="data-fields-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 30px;"><input type="checkbox" id="selectAllCheckbox" /></th>
+                      <th style="width: 120px;">ID <button class="sort-btn" data-column="id">↕</button></th>
+                      <th>Description <button class="sort-btn" data-column="description">↕</button></th>
+                      <th style="width: 80px;">Type <button class="sort-btn" data-column="type">↕</button></th>
+                      <th style="width: 70px;">Cov % <button class="sort-btn" data-column="coverage">↕</button></th>
+                      <th style="width: 70px;">Users <button class="sort-btn" data-column="userCount">↕</button></th>
+                      <th style="width: 70px;">Alphas <button class="sort-btn" data-column="alphaCount">↕</button></th>
+                    </tr>
+                    <tr class="filter-row">
+                      <th></th>
+                      <th><input type="text" class="column-filter" data-column="id" placeholder="过滤ID..." /></th>
+                      <th><input type="text" class="column-filter" data-column="description" placeholder="过滤描述..." /></th>
+                      <th></th>
+                      <th>
+                        <div class="range-filter">
+                          <input type="number" class="column-filter-min" placeholder="Min" />
+                          <input type="number" class="column-filter-max" placeholder="Max" />
+                        </div>
+                      </th>
+                      <th><input type="number" class="column-filter" data-column="userCount" placeholder="Min" /></th>
+                      <th><input type="number" class="column-filter" data-column="alphaCount" placeholder="Min" /></th>
+                    </tr>
+                  </thead>
+                  <tbody id="dataFieldsTableBody"></tbody>
+                </table>
+              </div>
+              <div class="selected-data-fields">
+                <strong>已选择字段 (<span id="selectedCount">0</span>)</strong>
+                <div id="selectedDataFields" class="selected-items"></div>
+              </div>
+            </div>
+            <div class="data-fields-stats">
+              <span id="dataFieldsCount">0 fields loaded</span> | 
+              <span id="filteredCount">0 filtered</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button data-action="applySelectedDataFields">应用并关闭</button>
+          <button class="btn-outline" data-action="closeDataFieldsModal">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 预览 Modal -->
+    <div id="previewModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="previewModalTitle">文件预览</h3>
+          <span class="close" data-action="closePreviewModal">&times;</span>
+        </div>
+        <div class="modal-body">
+          <pre id="previewModalBody" style="background:#f1f5f9; padding:15px; border-radius:8px; overflow:auto; max-height:60vh; font-family:monospace; font-size:12px;"></pre>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-outline" data-action="closePreviewModal">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>

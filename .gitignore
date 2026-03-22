@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+*.env
+runs/
+archive/
+*.db
+generated/
+metadata/
+db/
+
+# local config and credentials
+config/aom.toml
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# archives and temp exports
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

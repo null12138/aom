@@ -1,0 +1,83 @@
+{
+  "schema_version": "0.1",
+  "template_id": "demo",
+  "template": "<group_op/>(power(<ts_op/>(abs(<data/>),<day1/>),2)-power(<ts_op/>(<data/>,<day1/>),2),<group/>)\n",
+  "fill_rules": {
+    "group_op": [
+      "group_neutralize",
+      "group_zscore",
+      "group_rank",
+      "group_normalize"
+    ],
+    "ts_op": [
+      "ts_std_dev",
+      "ts_rank",
+      "ts_sum",
+      "ts_zscore"
+    ],
+    "data": [
+      "rsk68_beta",
+      "rsk68_residual_return",
+      "rsk68_weight_dadv",
+      "rsk68_weight_edadv",
+      "rsk68_weight_volatility_short",
+      "apacm6_total_market_cap_usd",
+      "current_market_cap_usd",
+      "rsk70_mfm2_asetrd_anlystsn",
+      "rsk70_mfm2_asetrd_beta",
+      "rsk70_mfm2_asetrd_btop",
+      "rsk70_mfm2_asetrd_cnt_jpn",
+      "rsk70_mfm2_asetrd_cntadj",
+      "rsk70_mfm2_asetrd_divyild",
+      "rsk70_mfm2_asetrd_dsrt",
+      "rsk70_mfm2_asetrd_earnqlty",
+      "rsk70_mfm2_asetrd_earnvar",
+      "rsk70_mfm2_asetrd_earnyild",
+      "rsk70_mfm2_asetrd_growth",
+      "rsk70_mfm2_asetrd_indadj",
+      "rsk70_mfm2_asetrd_indmom",
+      "rsk70_mfm2_asetrd_invsqlty",
+      "rsk70_mfm2_asetrd_leverage",
+      "rsk70_mfm2_asetrd_ltrevrsl",
+      "rsk70_mfm2_asetrd_market",
+      "rsk70_mfm2_asetrd_midcap",
+      "rsk70_mfm2_asetrd_momentum",
+      "rsk70_mfm2_asetrd_newssent",
+      "rsk70_mfm2_asetrd_primaryindustry",
+      "rsk70_mfm2_asetrd_profit",
+      "rsk70_mfm2_asetrd_resvol",
+      "rsk70_mfm2_asetrd_season",
+      "rsk70_mfm2_asetrd_shortint",
+      "rsk70_mfm2_asetrd_size",
+      "rsk70_mfm2_asetrd_srisk",
+      "rsk70_mfm2_asetrd_srisku",
+      "rsk70_mfm2_asetrd_srtindcnt",
+      "rsk70_mfm2_asetrd_strevrsl",
+      "rsk72_asi_top1000_eqy_dsrt",
+      "rsk72_asi_top1500_eqy_dsrt",
+      "rsk72_asi_top2000_eqy_dsrt",
+      "rsk72_asi_top500_eqy_dsrt",
+      "rsk72_eqy_asi_supported_minvol1m_dsrt",
+      "rsk72_eqy_jpp_supported_minvol1m_dsrt"
+    ],
+    "day1": [
+      "5",
+      "20",
+      "120",
+      "252"
+    ],
+    "group": [
+      "market",
+      "country",
+      "industry",
+      "subindustry"
+    ]
+  },
+  "metadata": {
+    "priority": 100,
+    "tags": [
+      "demo"
+    ],
+    "settings_override": {}
+  }
+}

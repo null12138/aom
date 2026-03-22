@@ -1,0 +1,60 @@
+{
+  "schema_version": "0.1",
+  "template_id": "1",
+  "template": "divide(<x/>, add(1, <y/>))",
+  "fill_rules": {
+    "x": [
+      "fnd109_atlas_unit_name",
+      "fnd109_cancellation_score",
+      "fnd109_cash_holding_score",
+      "fnd109_chair_board_score",
+      "fnd109_comp_com_num_independent_score",
+      "fnd109_comp_committee_score",
+      "fnd109_company_name",
+      "fnd109_compensation_policy_score",
+      "fnd109_disclosure_of_compensation_score",
+      "fnd109_electric_voting_score",
+      "fnd109_english_convocation_score",
+      "fnd109_english_disclosure_score",
+      "fnd109_equity_issuance_score",
+      "fnd109_grade",
+      "fnd109_growth_policy_score",
+      "fnd109_hp_information_score",
+      "fnd109_incentive_plan_score",
+      "fnd109_ir_department_score",
+      "fnd109_jp_sec",
+      "fnd109_meeting_for_institutions_score",
+      "fnd109_mid_term_plan_score",
+      "fnd109_nom_com_num_of_independent_director_score",
+      "fnd109_nom_committee_score",
+      "fnd109_num_independent_directors",
+      "fnd109_other_score",
+      "fnd109_overseas_ownership",
+      "fnd109_ownership_score_gt_20_pct_owner",
+      "fnd109_ownership_score_parent",
+      "fnd109_pct_independent_audit",
+      "fnd109_pct_independent_audit_score",
+      "fnd109_pct_independent_directors",
+      "fnd109_pct_independent_directors_score",
+      "fnd109_pct_woman_score",
+      "fnd109_quantitative_target_score",
+      "fnd109_remarks",
+      "fnd109_retired_top_management_remaining_company_score",
+      "fnd109_stock_holding_score",
+      "fnd109_stock_holdings",
+      "fnd109_stocks_per_sales",
+      "fnd109_takeover_defense_score",
+      "fnd109_term_year_directors_score",
+      "fnd109_total_num_directors_score",
+      "fnd109_total_score"
+    ],
+    "y": []
+  },
+  "metadata": {
+    "priority": 100,
+    "tags": [
+      "demo"
+    ],
+    "settings_override": {}
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema_version": "0.1",
+  "template_id": "SUE",
+  "template": "ts_av_diff(<sue/>, <d1/>)/ts_std_dev(<sue/>, <d2/>)",
+  "fill_rules": {
+    "sue": [
+      "oth327_mktcap",
+      "oth327_sirc_lev",
+      "oth327_sirc_sl",
+      "oth335_combined_all_region_hedge",
+      "oth335_combined_all_region_linear",
+      "oth335_combined_all_region_mind",
+      "oth335_combined_all_region_mktcap",
+      "oth335_combined_all_region_shield",
+      "oth335_hc_combined_all_region_hedge",
+      "oth335_hc_combined_all_region_linear",
+      "oth335_hc_combined_all_region_mind",
+      "oth335_hc_combined_all_region_mktcap",
+      "oth335_hc_combined_all_region_shield",
+      "oth423_b_mtl_dlyspe",
+      "oth423_cfrnoa",
+      "oth423_div_payout",
+      "oth423_divyld",
+      "oth423_divyld_exp",
+      "oth423_find",
+      "oth423_gva_mmocer_se",
+      "oth423_m1m21_ntr",
+      "oth423_m3r_mtn_spd_se",
+      "oth423_m3r_mtn_spe_se",
+      "oth423_mktcap",
+      "oth423_news_sent_3m",
+      "oth423_ntr_pt",
+      "oth423_roe",
+      "oth423_spd_rtni_rg",
+      "oth423_spe_rtni_rg",
+      "oth423_ve_fcf",
+      "dividend_growth_factor_score",
+      "oth424_divyld",
+      "oth424_mktcap",
+      "oth428_accounting_methods",
+      "oth428_dividend_per_share_2q_end",
+      "oth428_dividend_per_share_fiscal_year_end",
+      "oth428_dividend_per_share_yearly_total",
+      "oth428_edinet_code",
+      "oth428_net_profit",
+      "oth428_operating_profit",
+      "oth428_recurring_profit",
+      "oth428_spe",
+      "oth428_total_sales",
+      "oth428_z_4_digit_number_for_jp_listed_companies"
+    ],
+    "d1": [
+      "120",
+      "80",
+      "60"
+    ],
+    "d2": [
+      "220",
+      "200",
+      "180"
+    ]
+  },
+  "metadata": {
+    "priority": 100,
+    "settings_override": {}
+  }
+}
