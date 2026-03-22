@@ -4,12 +4,12 @@ __pycache__/
 .env
 .env.*
 *.env
-runs/
-archive/
+/runs/
+/archive/
 *.db
-generated/
-metadata/
-db/
+/generated/
+/metadata/
+/db/
 
 # local config and credentials
 config/aom.toml
