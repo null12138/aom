@@ -20,6 +20,65 @@ WEB_DIR = ROOT_DIR / "webui"
 UPLOAD_DIR = ROOT_DIR / "runs" / "uploads"
 logger = logging.getLogger("AOMFileOps")
 
+DEFAULT_SETTINGS_OPTIONS: Dict[str, Any] = {
+    "instrumentType": {
+        "choices": [
+            {"value": "EQUITY"},
+        ]
+    },
+    "region": {
+        "choices": [
+            {"value": "USA"},
+            {"value": "GLB"},
+            {"value": "EUR"},
+            {"value": "ASI"},
+            {"value": "CHN"},
+            {"value": "KOR"},
+            {"value": "TWN"},
+            {"value": "IND"},
+        ]
+    },
+    "delay": {
+        "choices": [
+            {"value": 1},
+            {"value": 0},
+        ]
+    },
+    "universe": {
+        "choices": [
+            {"value": "TOP3000"},
+            {"value": "TOP2000"},
+            {"value": "TOP1000"},
+            {"value": "TOP500"},
+            {"value": "TOP200"},
+            {"value": "TOPSP500"},
+            {"value": "MINVOL1M"},
+        ]
+    },
+}
+
+
+def default_settings_options_payload() -> Dict[str, Any]:
+    # Deep copy via JSON to keep callers side-effect free.
+    return json.loads(json.dumps(DEFAULT_SETTINGS_OPTIONS, ensure_ascii=False))
+
+
+def is_valid_settings_options_payload(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    keys = set(raw.keys())
+    if "instrumentType" in keys or "instrument_type" in keys:
+        return True
+    return "region" in keys and "delay" in keys and "universe" in keys
+
+
+def write_default_settings_options(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(default_settings_options_payload(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 def resolve_path(raw_path: str) -> Path:
     path = Path(raw_path)
@@ -105,6 +164,10 @@ def list_files(kind: str | None, folder: str | None = None) -> Dict[str, Any]:
         default_path = base / str(default_name)
         if not default_path.exists():
             default_path.write_text("[]", encoding="utf-8")
+    if kind == "settings" and default_name:
+        default_path = base / str(default_name)
+        if not default_path.exists():
+            write_default_settings_options(default_path)
     files = sorted([p.name for p in base.iterdir() if p.is_file() and match_ext(p.name, exts)])
     dirs = sorted([p.name for p in base.iterdir() if p.is_dir()])
     if default_name not in files and files:
@@ -140,7 +203,7 @@ def create_file(kind: str | None, name: str | None, folder: str | None = None) -
         }
         path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     elif kind == "settings":
-        path.write_text("{}", encoding="utf-8")
+        write_default_settings_options(path)
     elif kind == "datafields":
         path.write_text(json.dumps({"results": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     elif kind == "operators":

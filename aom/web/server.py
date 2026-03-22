@@ -58,7 +58,8 @@ from .file_ops import (
     create_folder, preview_file, load_template_library, save_template_library,
     template_key, find_template_item, normalize_template_item, upsert_template_item,
     load_dataset_cache, save_dataset_cache, load_datafields_cache, save_datafields_cache,
-    build_datafields_cache_key, normalize_upload_filename
+    build_datafields_cache_key, normalize_upload_filename,
+    is_valid_settings_options_payload, write_default_settings_options,
 )
 from .brain_api import (
     load_brain_config, fetch_datafield_types,
@@ -588,10 +589,11 @@ class AOMHandler(BaseHTTPRequestHandler):
         if path == "/api/settings-options/list":
             settings_path = resolve_path(payload.get("file") or "metadata/settings_options.json")
             if not settings_path.exists():
-                raise ValueError("settings options file not found")
+                write_default_settings_options(settings_path)
             raw = json.loads(settings_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("settings options must be a JSON object")
+            if not is_valid_settings_options_payload(raw):
+                write_default_settings_options(settings_path)
+                raw = json.loads(settings_path.read_text(encoding="utf-8"))
             return {"raw": raw}
 
         if path == "/api/datafields/types":
