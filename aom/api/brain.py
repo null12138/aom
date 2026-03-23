@@ -212,6 +212,34 @@ class BrainClient:
         resp = self._request("GET", f"{self.api_base}/alphas/{alpha_id}")
         return resp.json()
 
+    def get_submission_check(self, alpha_id: str) -> Dict[str, Any]:
+        endpoints = [
+            ("GET", f"{self.api_base}/alphas/{alpha_id}/check", None),
+            ("GET", f"{self.api_base}/alphas/{alpha_id}/checks", None),
+            ("GET", f"{self.api_base}/alphas/{alpha_id}/submission-check", None),
+            ("POST", f"{self.api_base}/alphas/{alpha_id}/check", {}),
+        ]
+        last_error: Optional[str] = None
+        for method, url, payload in endpoints:
+            try:
+                kwargs: Dict[str, Any] = {}
+                if payload is not None:
+                    kwargs["json"] = payload
+                resp = self._request(method, url, **kwargs)
+                if resp.status_code // 100 == 2:
+                    data = resp.json()
+                    return data if isinstance(data, dict) else {"raw": data}
+                if resp.status_code in (404, 405):
+                    last_error = f"{resp.status_code} {resp.text}"
+                    continue
+                raise BrainApiError(
+                    f"submission check failed: {resp.status_code} {resp.text}",
+                    status_code=resp.status_code,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+        raise BrainApiError(f"submission check endpoint unavailable for alpha={alpha_id}: {last_error}")
+
     def get_simulation(self, sid: str) -> Dict[str, Any]:
         resp = self._request("GET", f"{self.api_base}/simulations/{sid}")
         return resp.json()

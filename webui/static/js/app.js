@@ -80,6 +80,10 @@ const ui = {
   dreamErrorCooldownSec: document.getElementById('dream_error_cooldown_sec'),
   dreamAuthRefreshSec: document.getElementById('dream_auth_refresh_sec'),
   dreamOperatorRefreshSec: document.getElementById('dream_operator_refresh_sec'),
+  dreamBaselineAlphaId: document.getElementById('dream_baseline_alpha_id'),
+  dreamForceStage: document.getElementById('dream_force_stage'),
+  dreamOperatorsFile: document.getElementById('dream_operators_file'),
+  dreamResultsFile: document.getElementById('dream_results_file'),
   dreamSharpeAbsThreshold: document.getElementById('dream_sharpe_abs_threshold'),
   dreamFitnessThreshold: document.getElementById('dream_fitness_threshold'),
   dreamTemplateSharpeThreshold: document.getElementById('dream_template_sharpe_threshold'),
@@ -88,6 +92,10 @@ const ui = {
   dreamCursorFile: document.getElementById('dream_cursor_file'),
   dreamHighTemplateFile: document.getElementById('dream_high_template_file'),
   dreamNotifyUrl: document.getElementById('dream_notify_url'),
+  dreamPgSeedDsn: document.getElementById('dream_pg_seed_dsn'),
+  dreamPgSeedTable: document.getElementById('dream_pg_seed_table'),
+  dreamPgSeedMinFitness: document.getElementById('dream_pg_seed_min_fitness'),
+  dreamPgSeedTurnoverRange: document.getElementById('dream_pg_seed_turnover_range'),
   dreamSeedBootstrap: document.getElementById('dream_seed_bootstrap'),
   dreamStatusLabel: document.getElementById('dream_status_label'),
 };
@@ -642,6 +650,16 @@ const parseDreamSeedBootstrap = () => {
   return Array.from(new Set(list));
 };
 
+const parseDreamTurnoverRange = () => {
+  const raw = ui.dreamPgSeedTurnoverRange ? String(ui.dreamPgSeedTurnoverRange.value || '').trim() : '';
+  if (!raw) return { min: 5, max: 200 };
+  const parts = raw.split(',').map((x) => Number(String(x).trim())).filter((x) => Number.isFinite(x));
+  if (parts.length < 2) return { min: 5, max: 200 };
+  const min = Math.min(parts[0], parts[1]);
+  const max = Math.max(parts[0], parts[1]);
+  return { min, max };
+};
+
 const renderDreamStatus = (payload) => {
   if (!ui.dreamStatusLabel) return;
   const data = payload && payload.data ? payload.data : payload;
@@ -657,9 +675,14 @@ const renderDreamStatus = (payload) => {
   const accepted = Number(stats.accepted || 0);
   const highs = Number(stats.high_templates || 0);
   const errors = Number(stats.errors || 0);
+  const pgSaved = Number(stats.pg_seed_saved || 0);
+  const pgErrors = Number(stats.pg_seed_errors || 0);
   const statusText = stopping ? '停止中' : (running ? '运行中' : '已停止');
   const lastError = data.last_error ? String(data.last_error).replace(/\s+/g, ' ').slice(0, 120) : '';
-  ui.dreamStatusLabel.textContent = `状态：${statusText} | cycles=${cycles} simulated=${simulated} accepted=${accepted} high=${highs} errors=${errors}${lastError ? ` | last=${lastError}` : ''}`;
+  const optimizer = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : {};
+  const stage = optimizer.stage ? String(optimizer.stage) : '-';
+  const shortflipQueueSize = Number(optimizer.shortflip_queue_size || 0);
+  ui.dreamStatusLabel.textContent = `状态：${statusText} | stage=${stage} cycles=${cycles} simulated=${simulated} accepted=${accepted} high=${highs} errors=${errors} shortflip=${shortflipQueueSize} pg_saved=${pgSaved} pg_err=${pgErrors}${lastError ? ` | last=${lastError}` : ''}`;
 };
 
 const stopDreamStatusPolling = () => {
@@ -1982,17 +2005,27 @@ const actions = {
       delay: df.delay ? Number(df.delay.value || 1) : 1,
       universe: df.universe ? df.universe.value : 'TOP3000',
     };
+    const turnoverRange = parseDreamTurnoverRange();
     const payload = {
       fields: aiSelectedFields,
       context,
       report_text: ai.reportText ? ai.reportText.value : '',
       include_patterns: ai.includePatterns ? ai.includePatterns.checked : true,
-      generation_count: ui.dreamGenerationCount && ui.dreamGenerationCount.value ? Number(ui.dreamGenerationCount.value) : (ai.genCount && ai.genCount.value ? Number(ai.genCount.value) : 5),
+      generation_count: 8,
       interval_sec: ui.dreamIntervalSec && ui.dreamIntervalSec.value ? Number(ui.dreamIntervalSec.value) : 30,
       max_wait_sec: ui.dreamMaxWaitSec && ui.dreamMaxWaitSec.value ? Number(ui.dreamMaxWaitSec.value) : 1800,
       error_notify_cooldown_sec: ui.dreamErrorCooldownSec && ui.dreamErrorCooldownSec.value ? Number(ui.dreamErrorCooldownSec.value) : 180,
       auth_refresh_interval_sec: ui.dreamAuthRefreshSec && ui.dreamAuthRefreshSec.value ? Number(ui.dreamAuthRefreshSec.value) : 900,
       operators_refresh_interval_sec: ui.dreamOperatorRefreshSec && ui.dreamOperatorRefreshSec.value ? Number(ui.dreamOperatorRefreshSec.value) : 1800,
+      baseline_alpha_id: ui.dreamBaselineAlphaId ? String(ui.dreamBaselineAlphaId.value || '').trim() : '',
+      force_stage: ui.dreamForceStage ? String(ui.dreamForceStage.value || '').trim().toUpperCase() : '',
+      operators_file: ui.dreamOperatorsFile ? String(ui.dreamOperatorsFile.value || '').trim() : 'metadata/operators.json',
+      results_file: ui.dreamResultsFile ? String(ui.dreamResultsFile.value || '').trim() : '',
+      pg_seed_dsn: ui.dreamPgSeedDsn ? String(ui.dreamPgSeedDsn.value || '').trim() : '',
+      pg_seed_table: ui.dreamPgSeedTable ? String(ui.dreamPgSeedTable.value || '').trim() : 'dream_alpha_good_seeds',
+      pg_seed_min_fitness: ui.dreamPgSeedMinFitness && ui.dreamPgSeedMinFitness.value ? Number(ui.dreamPgSeedMinFitness.value) : 0.9,
+      pg_seed_min_turnover: turnoverRange.min,
+      pg_seed_max_turnover: turnoverRange.max,
       sharpe_abs_threshold: ui.dreamSharpeAbsThreshold && ui.dreamSharpeAbsThreshold.value ? Number(ui.dreamSharpeAbsThreshold.value) : 1.0,
       fitness_threshold: ui.dreamFitnessThreshold && ui.dreamFitnessThreshold.value ? Number(ui.dreamFitnessThreshold.value) : 1.0,
       template_sharpe_threshold: ui.dreamTemplateSharpeThreshold && ui.dreamTemplateSharpeThreshold.value ? Number(ui.dreamTemplateSharpeThreshold.value) : 1.58,

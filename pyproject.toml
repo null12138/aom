@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
   "textual>=0.70.0",
   "requests>=2.31.0",
+  "psycopg[binary]>=3.1.19",
   "tomli; python_version < '3.11'",
 ]
 
