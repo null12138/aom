@@ -639,6 +639,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 "report_text": payload.get("report_text") or "",
                 "include_patterns": payload.get("include_patterns", True),
                 "generation_count": payload.get("generation_count", payload.get("count", 5)),
+                "start_mode": str(payload.get("start_mode") or "inherit"),
                 "generation_attempts": payload.get("generation_attempts", 3),
                 "mutation_multiplier": payload.get("mutation_multiplier", 3),
                 "simulation_concurrency": payload.get("simulation_concurrency", 5),

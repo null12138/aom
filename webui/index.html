@@ -230,6 +230,7 @@
               <p class="muted">WebUI 仅作控制面板，核心循环在后端持续运行（24h 可用）。</p>
               <div class="grid">
                 <label>每轮生成数量(固定8)<input type="number" id="dream_generation_count" value="8" min="8" max="8" /></label>
+                <label>启动模式<select id="dream_start_mode"><option value="inherit" selected>继承继续</option><option value="fresh">全新启动</option></select></label>
                 <label>轮询间隔(秒)<input type="number" id="dream_interval_sec" value="30" min="5" max="3600" /></label>
                 <label>单次回测超时(秒)<input type="number" id="dream_max_wait_sec" value="1800" min="60" max="7200" /></label>
                 <label>错误推送冷却(秒)<input type="number" id="dream_error_cooldown_sec" value="180" min="0" max="3600" /></label>

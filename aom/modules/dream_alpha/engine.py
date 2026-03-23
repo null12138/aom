@@ -852,33 +852,119 @@ def _extract_choice_values(node: Any) -> List[str]:
     return out
 
 
+def _extract_choices_with_children(node: Any) -> List[Dict[str, Any]]:
+    if not isinstance(node, dict):
+        return []
+    choices = node.get("choices") or node.get("values") or []
+    out: List[Dict[str, Any]] = []
+    for item in choices:
+        if isinstance(item, dict):
+            value = item.get("value")
+            if value is None:
+                value = item.get("id") or item.get("name") or item.get("key")
+            if value is None:
+                continue
+            out.append(
+                {
+                    "value": str(value),
+                    "children": item.get("children") if isinstance(item.get("children"), dict) else {},
+                }
+            )
+        else:
+            out.append({"value": str(item), "children": {}})
+    return out
+
+
+def _find_setting_node(node: Any, key: str, depth: int = 0) -> Dict[str, Any]:
+    if depth > 10:
+        return {}
+    if isinstance(node, dict):
+        direct = node.get(key)
+        if isinstance(direct, dict):
+            return direct
+        children = node.get("children")
+        if isinstance(children, dict):
+            found = _find_setting_node(children, key, depth + 1)
+            if found:
+                return found
+        for value in node.values():
+            found = _find_setting_node(value, key, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_setting_node(item, key, depth + 1)
+            if found:
+                return found
+    return {}
+
+
+def _is_placeholder_choices(choices: List[str]) -> bool:
+    if not choices:
+        return False
+    keys = {"instrumenttype", "region", "delay", "universe", "neutralization", "language"}
+    lower = {str(item).strip().lower() for item in choices if str(item).strip()}
+    return bool(lower) and lower.issubset(keys)
+
+
+def _pick_choice_children(setting_node: Dict[str, Any], selected_value: str) -> Dict[str, Any]:
+    for item in _extract_choices_with_children(setting_node):
+        if str(item.get("value") or "") == selected_value:
+            children = item.get("children")
+            if isinstance(children, dict):
+                return children
+    return {}
+
+
+def _validate_setting_value(
+    selected_value: str,
+    setting_node: Dict[str, Any],
+    setting_name: str,
+) -> Tuple[bool, str]:
+    choices = _extract_choice_values(setting_node)
+    if not choices or _is_placeholder_choices(choices):
+        return (True, "")
+    if str(selected_value) in set(choices):
+        return (True, "")
+    return (False, f"invalid {setting_name}={selected_value}, valid={choices}")
+
+
 def _validate_context_settings_with_options(context: Dict[str, Any], options: Dict[str, Any]) -> Tuple[bool, str]:
     if not isinstance(context, dict):
         context = {}
     if not isinstance(options, dict):
         return (True, "")
 
-    settings_node = options
     instrument = str(context.get("instrumentType") or context.get("instrument") or "EQUITY")
     region = str(context.get("region") or "USA")
     delay = str(_to_int(context.get("delay"), 1))
     universe = str(context.get("universe") or "TOP3000")
 
-    instrument_choices = _extract_choice_values(settings_node.get("instrumentType") or {})
-    if instrument_choices and instrument not in instrument_choices:
-        return (False, f"invalid instrumentType={instrument}, valid={instrument_choices}")
+    instrument_node = _find_setting_node(options, "instrumentType")
+    ok, err = _validate_setting_value(instrument, instrument_node, "instrumentType")
+    if not ok:
+        return (False, err)
 
-    region_choices = _extract_choice_values(settings_node.get("region") or {})
-    if region_choices and region not in region_choices:
-        return (False, f"invalid region={region}, valid={region_choices}")
+    instrument_children = _pick_choice_children(instrument_node, instrument)
+    level_region_root: Any = instrument_children if instrument_children else options
+    region_node = _find_setting_node(level_region_root, "region")
+    ok, err = _validate_setting_value(region, region_node, "region")
+    if not ok:
+        return (False, err)
 
-    delay_choices = _extract_choice_values(settings_node.get("delay") or {})
-    if delay_choices and delay not in delay_choices:
-        return (False, f"invalid delay={delay}, valid={delay_choices}")
+    region_children = _pick_choice_children(region_node, region)
+    level_delay_root: Any = region_children if region_children else level_region_root
+    delay_node = _find_setting_node(level_delay_root, "delay")
+    ok, err = _validate_setting_value(delay, delay_node, "delay")
+    if not ok:
+        return (False, err)
 
-    universe_choices = _extract_choice_values(settings_node.get("universe") or {})
-    if universe_choices and universe not in universe_choices:
-        return (False, f"invalid universe={universe}, valid={universe_choices}")
+    delay_children = _pick_choice_children(delay_node, delay)
+    level_universe_root: Any = delay_children if delay_children else level_delay_root
+    universe_node = _find_setting_node(level_universe_root, "universe")
+    ok, err = _validate_setting_value(universe, universe_node, "universe")
+    if not ok:
+        return (False, err)
 
     return (True, "")
 
@@ -1025,7 +1111,10 @@ class DreamAlphaDaemon:
             self._cfg = merged_cfg
 
             initial = self._default_state()
-            loaded_cursor = self._load_cursor()
+            if str(merged_cfg.get("start_mode") or "inherit") == "fresh":
+                loaded_cursor = dict(initial.get("cursor") or {})
+            else:
+                loaded_cursor = self._load_cursor()
             initial["cursor"] = loaded_cursor
             initial_stats = initial.get("stats", {})
             initial_stats["cycles"] = int(loaded_cursor.get("cycle", 0))
@@ -1097,6 +1186,10 @@ class DreamAlphaDaemon:
         out["generation_count"] = BATCH_SIZE_STRICT
         out["interval_sec"] = max(5, _to_int(out.get("interval_sec"), 30))
         out["max_wait_sec"] = max(60, _to_int(out.get("max_wait_sec"), 1800))
+        start_mode = str(out.get("start_mode") or "inherit").strip().lower()
+        if start_mode not in {"inherit", "fresh"}:
+            start_mode = "inherit"
+        out["start_mode"] = start_mode
         out["max_seed_in_prompt"] = max(1, _to_int(out.get("max_seed_in_prompt"), 20))
         out["auth_refresh_interval_sec"] = max(60, _to_int(out.get("auth_refresh_interval_sec"), 900))
         out["operators_refresh_interval_sec"] = max(60, _to_int(out.get("operators_refresh_interval_sec"), 1800))
@@ -1181,6 +1274,7 @@ class DreamAlphaDaemon:
     def _public_cfg(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "generation_count": cfg["generation_count"],
+            "start_mode": cfg["start_mode"],
             "interval_sec": cfg["interval_sec"],
             "max_wait_sec": cfg["max_wait_sec"],
             "sharpe_abs_threshold": cfg["sharpe_abs_threshold"],
@@ -1970,7 +2064,16 @@ ON CONFLICT (unique_key) DO UPDATE SET
             if not username or not password:
                 raise ValueError("brain credentials missing")
 
-            seed_payload = self._normalize_seed_file(seed_file)
+            start_mode = str(cfg.get("start_mode") or "inherit").strip().lower()
+            if start_mode == "fresh":
+                seed_payload = {
+                    "schema_version": "0.1",
+                    "updated_at": _utc_now(),
+                    "items": [],
+                }
+                _write_json_atomic(seed_file, seed_payload)
+            else:
+                seed_payload = self._normalize_seed_file(seed_file)
             seed_items = seed_payload.get("items", [])
 
             for expr in cfg.get("seed_expressions") or []:
