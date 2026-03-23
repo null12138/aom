@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "template_id": "连贯数据",
-  "template": "(<field1/> - ts_mean(<field1/>, <day/>)) / ts_mean(<field1/>, <day/>)\n",
+  "template": "rank(ts_delta(ts_backfill(<field1/>, 63), <day/>))\n",
   "fill_rules": {
     "field1": [
       "anl10_dpsinnovate_decrease_fy1_7038",

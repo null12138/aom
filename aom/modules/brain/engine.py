@@ -77,6 +77,43 @@ class AlphaGenerator:
             raise RuntimeError(f"OpenAI API error: {resp.status_code} {resp.text}")
         return self._parse_json_response(resp.json()["choices"][0]["message"]["content"])
 
+    def repair_expression(
+        self,
+        expression: str,
+        errors: List[str],
+        fields: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+        operators: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        prompt = self._build_repair_prompt(expression, errors, fields or [], context or {}, operators or [])
+        text: str = ""
+        if self.openai_key:
+            url = f"{self.openai_base}/chat/completions"
+            headers = {"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"}
+            payload = {
+                "model": self.openai_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            }
+            resp = self._post_with_retry(url=url, headers=headers, payload=payload, provider_name="OpenAI-compatible")
+            if resp.status_code != 200:
+                raise RuntimeError(f"OpenAI repair error: {resp.status_code} {resp.text}")
+            text = str(resp.json()["choices"][0]["message"]["content"])
+        elif self.gemini_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.gemini_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 512},
+            }
+            resp = self._post_with_retry(url=url, payload=payload, provider_name="Gemini")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Gemini repair error: {resp.status_code} {resp.text}")
+            text = str(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+        else:
+            return ""
+        return self._parse_repair_response(text)
+
     def _post_with_retry(
         self,
         url: str,
@@ -194,6 +231,96 @@ class AlphaGenerator:
             logger.error(f"Response parsing failed: {e}\nText: {text}")
             raise RuntimeError(f"AI response parsing failed: {e}")
 
+    def _parse_repair_response(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        if "```json" in raw:
+            raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                expr = data.get("expression")
+                if isinstance(expr, str) and expr.strip():
+                    return expr.strip()
+                alphas = data.get("alphas")
+                if isinstance(alphas, list) and alphas:
+                    first = alphas[0]
+                    if isinstance(first, dict):
+                        expr = first.get("expression")
+                        if isinstance(expr, str) and expr.strip():
+                            return expr.strip()
+            elif isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict):
+                    expr = first.get("expression")
+                    if isinstance(expr, str) and expr.strip():
+                        return expr.strip()
+        except json.JSONDecodeError:
+            pass
+        # fallback: treat first non-empty line as expression
+        for line in raw.splitlines():
+            token = line.strip().strip(",")
+            if token and not token.startswith("{") and not token.startswith("}"):
+                return token
+        return ""
+
+    def _build_repair_prompt(
+        self,
+        expression: str,
+        errors: List[str],
+        fields: List[Dict[str, Any]],
+        context: Dict[str, Any],
+        operators: List[Dict[str, Any]],
+    ) -> str:
+        field_ids = []
+        for item in fields[:200]:
+            if not isinstance(item, dict):
+                continue
+            fid = str(item.get("id") or "").strip()
+            if fid:
+                field_ids.append(fid)
+        op_names = []
+        for op in operators[:200]:
+            if not isinstance(op, dict):
+                continue
+            name = str(op.get("name") or "").strip()
+            if name:
+                op_names.append(name)
+        error_text = "; ".join(str(err) for err in (errors or [])[:8]) or "unknown validation error"
+        region = str(context.get("region") or "USA")
+        universe = str(context.get("universe") or "TOP3000")
+        delay = str(context.get("delay") if context.get("delay") is not None else 1)
+        return f"""You are fixing one WorldQuant Brain FastExpr expression.
+
+Task:
+- Repair the expression so it is valid FastExpr and keeps original financial intent.
+- Keep operator calls <= 8.
+- Keep referenced fields <= 8.
+- Use ONLY provided fields.
+- Do not output assignment statements (`a = ...;`), only one final formula.
+- Prefer simple robust operators (rank/zscore/winsorize/ts_rank/ts_delta/ts_mean/ts_std_dev/group_rank/group_neutralize).
+
+Context: region={region}, universe={universe}, delay={delay}
+
+Original expression:
+{expression}
+
+Validation errors:
+{error_text}
+
+Allowed fields:
+{", ".join(field_ids) if field_ids else "-"}
+
+Allowed operators:
+{", ".join(op_names) if op_names else "-"}
+
+Return JSON only:
+{{"expression":"<fixed_fast_expr>"}}
+"""
+
     def _build_prompt(self, fields: List[Dict[str, Any]], report_text: Optional[str], patterns: Optional[List[Dict[str, Any]]], context: Optional[Dict[str, Any]], operators: Optional[List[Dict[str, Any]]], count: int) -> str:
         def _shorten(text: Any, limit: int = 180) -> str:
             raw = str(text or "").strip()
@@ -222,6 +349,8 @@ class AlphaGenerator:
         single_dataset_only = bool(context.get("single_dataset_only")) if isinstance(context, dict) else False
         mutation_mode = str(context.get("mutation_mode") or "").lower() if isinstance(context, dict) else ""
         max_operator_calls = int(context.get("max_operator_calls", 8)) if isinstance(context, dict) else 8
+        max_expression_fields = int(context.get("max_expression_fields", 8)) if isinstance(context, dict) else 8
+        prefer_simple_operators = bool(context.get("prefer_simple_operators")) if isinstance(context, dict) else False
         stage = str(context.get("stage") or "").strip().upper() if isinstance(context, dict) else ""
         reference_expression = str(context.get("reference_expression") or "").strip() if isinstance(context, dict) else ""
         
@@ -249,8 +378,20 @@ class AlphaGenerator:
         extra_rules = []
         if mutation_mode == "max":
             extra_rules.append("12. Mutation Mode MAX: enforce large operator-tree differences between candidates.")
+        if mutation_mode == "balanced":
+            extra_rules.append("12. Mutation Mode BALANCED: prioritize usable variants over aggressive structural novelty.")
         if single_dataset_only:
             extra_rules.append("13. Single Dataset ONLY: every expression must stay within one dataset family.")
+        if prefer_simple_operators:
+            extra_rules.append(
+                "14. Prefer simple operators: rank/zscore/winsorize/ts_rank/ts_delta/ts_mean/ts_std_dev/ts_zscore/ts_backfill/group_rank/group_zscore/group_neutralize/trade_when."
+            )
+            extra_rules.append(
+                "15. Avoid heavy operators unless necessary: regression/vector families and high-order correlation/kurtosis operators."
+            )
+            extra_rules.append(
+                "16. Keep nesting shallow and avoid weak structures like field/group_sum(field,group) or pure self-normalization clones."
+            )
         extra_rules_str = "\n".join(extra_rules)
         stage_str = f"- Stage: {stage}\n" if stage else ""
         reference_str = f"- Soft reference expression: {reference_expression}\n" if reference_expression else ""
@@ -275,6 +416,11 @@ B. Use varied horizons and operator families to reduce structural correlation.
 C. Prefer robust transforms for noisy fields: winsorize/zscore/rank/ts_backfill when helpful.
 D. Before finalizing, run a strict syntax and argument-count self-check for every expression.
 E. Reject template clones; each candidate must differ in both signal source and transform path.
+F. Financial thinking checklist before output:
+   - Hypothesis: define what inefficiency/risk-premium this captures.
+   - Mechanism: why this field and transform should predict future returns.
+   - Risk: avoid pure size/beta/industry leak unless intentionally controlled.
+   - Robustness: prefer interpretable, stable transforms over brittle overfitting.
 
 STRICT REQUIREMENTS (hard constraints):
 1. Syntax: MUST use WorldQuant Brain FastExpr syntax (e.g., ts_rank, ts_delta, ts_av, group_rank).
@@ -284,7 +430,9 @@ STRICT REQUIREMENTS (hard constraints):
 5. Operator Arity: STRICTLY follow each operator Sign/signature input count from the operator list. Never guess argument count.
 6. Field Scope: only use fields listed in "Available Data Fields". Do not invent field names.
 7. Operator Budget: each expression must use at most {max_operator_calls} operator calls.
+7b. Field Budget: each expression can reference at most {max_expression_fields} unique fields.
 8. Avoid placeholders or pseudo variables (e.g., x, y, alpha, beta, same_dataset, d).
+8b. Expression must be a single FastExpr formula; do not output assignment statements like `a = ...;`.
 9. Avoid near-duplicates: candidates must not be simple sign flips or tiny parameter edits of each other.
 10. Use field metadata: leverage each field's desc/type/dataset hints to pick valid transforms and avoid misuse.
 11. Use stable naming: "name" should be concise and unique; "logic" should explain edge in <= 30 words.

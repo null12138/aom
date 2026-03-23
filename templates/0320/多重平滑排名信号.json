@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "template_id": "demo",
-  "template": "<group_op/>(power(<ts_op/>(abs(<data/>),<day1/>),2)-power(<ts_op/>(<data/>,<day1/>),2),<group/>)\n",
+  "template": "group_rank(ts_mean(ts_rank(ts_backfill(<data/>, 63), <day1/>), <day1/>), <group/>)\n",
   "fill_rules": {
     "group_op": [
       "group_neutralize",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -602,8 +603,62 @@ OPERATOR_THEME_INDEX: Dict[str, str] = {
 }
 
 THEME_QUOTA_MIN = 4
-BATCH_SIZE_STRICT = 8
+DEFAULT_GENERATION_COUNT = 5
 FREQUENT_OP_LIMIT = 2
+DEFAULT_NOTIFY_URL = "https://tgpusher.opener.eu.org/"
+
+SIMPLE_PREFERRED_OPERATORS: Set[str] = {
+    "rank",
+    "zscore",
+    "winsorize",
+    "ts_rank",
+    "ts_delta",
+    "ts_mean",
+    "ts_std_dev",
+    "ts_zscore",
+    "ts_backfill",
+    "group_rank",
+    "group_zscore",
+    "group_neutralize",
+    "trade_when",
+}
+
+SIMPLE_DISCOURAGED_OPERATORS: Set[str] = {
+    "group_multi_regression",
+    "group_vector_neut",
+    "group_vector_proj",
+    "multi_regression",
+    "regression_neut",
+    "regression_proj",
+    "ts_poly_regression",
+    "ts_regression",
+    "ts_theilsen",
+    "ts_vector_neut",
+    "ts_vector_proj",
+    "vector_neut",
+    "vector_proj",
+    "ts_partial_corr",
+    "ts_triple_corr",
+    "ts_co_kurtosis",
+    "ts_co_skewness",
+}
+
+LOW_INFO_FIELD_TOKENS: Tuple[str, ...] = (
+    "id",
+    "code",
+    "name",
+    "currency",
+    "ticker",
+    "sedol",
+    "isin",
+    "cusip",
+    "flag",
+    "datatime",
+    "datetime",
+    "timestamp",
+    "remark",
+    "unit",
+)
 
 
 def _extract_function_calls(expression: str) -> List[Dict[str, Any]]:
@@ -826,17 +881,123 @@ def _analyze_expression(expression: str) -> Dict[str, Any]:
     }
 
 
+def _candidate_quality_score(candidate: Dict[str, Any], max_operator_calls: int, max_expression_fields: int) -> float:
+    expr = _normalize_expression(str(candidate.get("expression") or ""))
+    profile = _analyze_expression(expr)
+    op_calls = int(candidate.get("_operator_calls") or profile.get("operator_calls") or 0)
+    used_fields = list(candidate.get("_used_fields") or [])
+    field_count = len(used_fields)
+    ops = set(profile.get("operators") or set())
+    preferred_hits = sum(1 for op in ops if op in SIMPLE_PREFERRED_OPERATORS)
+    discouraged_hits = sum(1 for op in ops if op in SIMPLE_DISCOURAGED_OPERATORS)
+    # Encourage compact, robust expressions around 3~6 operators with moderate field breadth.
+    op_fit = max(0.0, 2.5 - 0.5 * abs(op_calls - 4))
+    field_fit = max(0.0, 2.0 - 0.4 * abs(field_count - 2))
+    hard_penalty = 0.0
+    if op_calls > max_operator_calls:
+        hard_penalty += 5.0
+    if field_count > max_expression_fields:
+        hard_penalty += 5.0
+    if field_count <= 0:
+        hard_penalty += 3.0
+    return op_fit + field_fit + 0.25 * preferred_hits - 0.8 * discouraged_hits - hard_penalty
+
+
+def _candidate_mutation_score(candidate: Dict[str, Any]) -> float:
+    expr = _normalize_expression(str(candidate.get("expression") or ""))
+    profile = _analyze_expression(expr)
+    ops = set(profile.get("operators") or set())
+    themes = set(profile.get("themes") or set())
+    # Favor structural diversity for mutation slots.
+    return float(len(ops)) + 1.5 * float(len(themes)) + random.uniform(0.0, 0.3)
+
+
+def _split_candidates_with_mutation(
+    candidates: List[Dict[str, Any]],
+    target_count: int,
+    max_operator_calls: int,
+    max_expression_fields: int,
+    mutation_ratio: float = 0.4,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if target_count <= 0:
+        return ([], list(candidates))
+    if len(candidates) <= target_count:
+        return (list(candidates), [])
+
+    scored: List[Tuple[float, float, int, Dict[str, Any]]] = []
+    for idx, item in enumerate(candidates):
+        scored.append(
+            (
+                _candidate_quality_score(item, max_operator_calls=max_operator_calls, max_expression_fields=max_expression_fields),
+                _candidate_mutation_score(item),
+                idx,
+                item,
+            )
+        )
+    scored.sort(key=lambda row: row[0], reverse=True)
+
+    mutation_slots = int(round(target_count * mutation_ratio))
+    mutation_slots = max(1, min(target_count - 1, mutation_slots)) if target_count > 1 else 0
+    exploit_slots = target_count - mutation_slots
+
+    selected_rows: List[Tuple[float, float, int, Dict[str, Any]]] = scored[:exploit_slots]
+    selected_idx = {row[2] for row in selected_rows}
+
+    mutation_pool = [row for row in scored[exploit_slots:] if row[2] not in selected_idx]
+    mutation_pool.sort(key=lambda row: row[1], reverse=True)
+    for row in mutation_pool:
+        if len(selected_rows) >= target_count:
+            break
+        selected_rows.append(row)
+        selected_idx.add(row[2])
+
+    if len(selected_rows) < target_count:
+        for row in scored:
+            if len(selected_rows) >= target_count:
+                break
+            if row[2] in selected_idx:
+                continue
+            selected_rows.append(row)
+            selected_idx.add(row[2])
+
+    selected = [row[3] for row in selected_rows[:target_count]]
+    backlog = [row[3] for row in scored if row[2] not in selected_idx]
+    return (selected, backlog)
+
+
+def _merge_candidate_backlog(
+    existing: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_expr: Set[str] = set()
+    for item in list(existing or []) + list(incoming or []):
+        if not isinstance(item, dict):
+            continue
+        expr = _normalize_expression(str(item.get("expression") or ""))
+        if not expr or expr in seen_expr:
+            continue
+        seen_expr.add(expr)
+        normalized = dict(item)
+        normalized["expression"] = expr
+        merged.append(normalized)
+        if len(merged) >= max(0, limit):
+            break
+    return merged
+
+
 def _pair_key_from_themes(themes: Set[str]) -> str:
     if not themes:
         return ""
     return "|".join(sorted(themes))
 
 
-def _check_batch_quotas(expressions: List[str], stage: str) -> Dict[str, Any]:
+def _check_batch_quotas(expressions: List[str], stage: str, batch_size: int) -> Dict[str, Any]:
     profiles = [_analyze_expression(expr) for expr in expressions]
     errors: List[str] = []
-    if len(expressions) != BATCH_SIZE_STRICT:
-        errors.append(f"batch size must be {BATCH_SIZE_STRICT}, got {len(expressions)}")
+    if len(expressions) != batch_size:
+        errors.append(f"batch size must be {batch_size}, got {len(expressions)}")
 
     theme_coverage: Set[str] = set()
     frequent_counter: Dict[str, int] = {}
@@ -852,25 +1013,29 @@ def _check_batch_quotas(expressions: List[str], stage: str) -> Dict[str, Any]:
                 f"slot#{idx + 1}: uses >=2 frequent operators but has no A-F theme operator"
             )
 
-    if len(theme_coverage) < THEME_QUOTA_MIN:
-        errors.append(f"theme coverage too low: {len(theme_coverage)} < {THEME_QUOTA_MIN}")
+    min_theme_coverage = max(2, min(THEME_QUOTA_MIN, batch_size // 2 + 1))
+    if len(theme_coverage) < min_theme_coverage:
+        errors.append(f"theme coverage too low: {len(theme_coverage)} < {min_theme_coverage}")
 
     for op, used in sorted(frequent_counter.items()):
         if int(used) > FREQUENT_OP_LIMIT:
             errors.append(f"frequent operator quota exceeded: {op} used {used} > {FREQUENT_OP_LIMIT}")
 
-    # Slot 6-8 are forced explore in both stages for stronger anti-homogenization.
-    pair_seen: Set[str] = set()
-    for slot in range(5, min(8, len(profiles))):
-        profile = profiles[slot]
-        themes = set(profile.get("themes") or set())
-        if len(themes) < 2:
-            errors.append(f"slot#{slot + 1}: explore candidate must include >=2 A-F themes")
-            continue
-        pair_key = _pair_key_from_themes(themes)
-        if pair_key in pair_seen:
-            errors.append(f"slot#{slot + 1}: explore theme pair duplicated with another explore slot")
-        pair_seen.add(pair_key)
+    # For larger batches keep tail slots explore-heavy to avoid homogenization.
+    if batch_size >= 8:
+        pair_seen: Set[str] = set()
+        for slot in range(max(0, batch_size - 3), batch_size):
+            if slot >= len(profiles):
+                continue
+            profile = profiles[slot]
+            themes = set(profile.get("themes") or set())
+            if len(themes) < 2:
+                errors.append(f"slot#{slot + 1}: explore candidate must include >=2 A-F themes")
+                continue
+            pair_key = _pair_key_from_themes(themes)
+            if pair_key in pair_seen:
+                errors.append(f"slot#{slot + 1}: explore theme pair duplicated with another explore slot")
+            pair_seen.add(pair_key)
 
     return {
         "ok": len(errors) == 0,
@@ -887,6 +1052,43 @@ def _strip_number_tokens(expression: str) -> str:
     text = re.sub(r"(?<![A-Za-z0-9_])[-+]?\d+(\.\d+)?", "<n>", text)
     text = re.sub(r"\s+", "", text)
     return text
+
+
+def _field_is_low_information(field_id: str) -> bool:
+    token = str(field_id or "").strip().lower()
+    if not token:
+        return True
+    return any(marker in token for marker in LOW_INFO_FIELD_TOKENS)
+
+
+def _is_weak_self_normalization(expression: str, used_fields: List[str]) -> bool:
+    text = re.sub(r"\s+", "", str(expression or "").lower())
+    if not text:
+        return True
+    for fid in used_fields:
+        key = str(fid or "").strip().lower()
+        if not key:
+            continue
+        if f"{key}/group_sum({key}," in text:
+            return True
+        if f"({key}-ts_mean({key}," in text and f")/ts_mean({key}," in text:
+            return True
+    return False
+
+
+def _violates_simple_operator_policy(expression: str) -> bool:
+    calls = _extract_function_calls(expression)
+    if not calls:
+        return True
+    op_names = {str(call.get("name_lower") or "").strip() for call in calls}
+    op_names.discard("")
+    if not op_names:
+        return True
+    if any(op in SIMPLE_DISCOURAGED_OPERATORS for op in op_names):
+        return True
+    if not any(op in SIMPLE_PREFERRED_OPERATORS for op in op_names):
+        return True
+    return False
 
 
 def _is_pure_parameter_tweak(candidate_expression: str, baseline_expression: str) -> bool:
@@ -1065,10 +1267,16 @@ class DreamAlphaDaemon:
                 "round_batches": 0,
                 "quota_rebuilds": 0,
                 "local_invalid": 0,
+                "backlog_reused": 0,
                 "submission_checks": 0,
                 "prod_corr_blocked": 0,
                 "cand_neg": 0,
                 "shortflip_generated": 0,
+                "field_limit_skipped": 0,
+                "repair_requested": 0,
+                "repair_success": 0,
+                "prefetch_ready": 0,
+                "prefetch_errors": 0,
                 "pg_seed_saved": 0,
                 "pg_seed_errors": 0,
                 "no_success_cycles": 0,
@@ -1115,7 +1323,7 @@ class DreamAlphaDaemon:
         return Path("runs/dream_alpha_optimization_results.txt")
 
     def _notify_url(self) -> str:
-        return str(self._cfg.get("notify_url") or "")
+        return str(self._cfg.get("notify_url") or DEFAULT_NOTIFY_URL)
 
     def _error_notify_cooldown(self) -> int:
         return max(0, _to_int(self._cfg.get("error_notify_cooldown_sec"), 180))
@@ -1314,7 +1522,7 @@ class DreamAlphaDaemon:
         out = dict(cfg or {})
         brain_cfg = out.get("brain") if isinstance(out.get("brain"), dict) else {}
         out["brain"] = brain_cfg
-        out["generation_count"] = BATCH_SIZE_STRICT
+        out["generation_count"] = max(1, min(32, _to_int(out.get("generation_count"), DEFAULT_GENERATION_COUNT)))
         out["interval_sec"] = max(5, _to_int(out.get("interval_sec"), 30))
         out["max_wait_sec"] = max(60, _to_int(out.get("max_wait_sec"), 1800))
         start_mode = str(out.get("start_mode") or "inherit").strip().lower()
@@ -1327,20 +1535,30 @@ class DreamAlphaDaemon:
         out["generation_attempts"] = max(1, min(6, _to_int(out.get("generation_attempts"), 3)))
         out["mutation_multiplier"] = max(1, min(8, _to_int(out.get("mutation_multiplier"), 3)))
         out["simulation_concurrency"] = max(1, min(32, _to_int(out.get("simulation_concurrency"), 5)))
-        out["max_operator_calls"] = max(1, min(64, _to_int(out.get("max_operator_calls"), 8)))
+        out["max_operator_calls"] = max(1, min(8, _to_int(out.get("max_operator_calls"), 8)))
+        out["max_expression_fields"] = max(1, min(8, _to_int(out.get("max_expression_fields"), 8)))
+        out["enable_llm_repair"] = _to_bool(out.get("enable_llm_repair"), True)
+        out["repair_attempts"] = max(0, min(2, _to_int(out.get("repair_attempts"), 1)))
+        out["mutation_keep_ratio"] = max(0.1, min(0.9, _to_float(out.get("mutation_keep_ratio"), 0.4)))
         out["error_notify_cooldown_sec"] = max(0, _to_int(out.get("error_notify_cooldown_sec"), 180))
         out["no_success_notify_every"] = max(1, _to_int(out.get("no_success_notify_every"), 2))
         out["no_success_notify_cooldown_sec"] = max(0, _to_int(out.get("no_success_notify_cooldown_sec"), 180))
+        out["strict_quota_enabled"] = _to_bool(out.get("strict_quota_enabled"), False)
         out["sharpe_abs_threshold"] = _to_float(out.get("sharpe_abs_threshold"), 1.0)
         out["fitness_threshold"] = _to_float(out.get("fitness_threshold"), 1.0)
         out["template_sharpe_threshold"] = _to_float(out.get("template_sharpe_threshold"), 1.58)
+        out["prefer_simple_operators"] = _to_bool(out.get("prefer_simple_operators"), True)
+        out["learning_seed_sharpe_min"] = _to_float(out.get("learning_seed_sharpe_min"), 0.20)
+        out["learning_seed_fitness_min"] = _to_float(out.get("learning_seed_fitness_min"), 0.05)
         out["include_patterns"] = _to_bool(out.get("include_patterns"), True)
         out["single_dataset_only"] = _to_bool(out.get("single_dataset_only"), True)
         out["seed_expressions"] = self._normalize_seed_exprs(out.get("seed_expressions"))
         out["fields"] = self._normalize_fields(out.get("fields"))
         out["context"] = out.get("context") if isinstance(out.get("context"), dict) else {}
         out["report_text"] = str(out.get("report_text") or "")
-        out["notify_url"] = str(out.get("notify_url") or "").strip()
+        notify_url = str(out.get("notify_url") or "").strip()
+        out["notify_url"] = notify_url or DEFAULT_NOTIFY_URL
+        out["push_all_console_notifications"] = _to_bool(out.get("push_all_console_notifications"), True)
         out["baseline_alpha_id"] = str(out.get("baseline_alpha_id") or "").strip()
         out["operators_file"] = str(out.get("operators_file") or "metadata/operators.json")
         out["results_file"] = str(out.get("results_file") or "").strip()
@@ -1413,6 +1631,7 @@ class DreamAlphaDaemon:
             "sharpe_abs_threshold": cfg["sharpe_abs_threshold"],
             "fitness_threshold": cfg["fitness_threshold"],
             "template_sharpe_threshold": cfg["template_sharpe_threshold"],
+            "prefer_simple_operators": cfg["prefer_simple_operators"],
             "include_patterns": cfg["include_patterns"],
             "max_seed_in_prompt": cfg["max_seed_in_prompt"],
             "auth_refresh_interval_sec": cfg["auth_refresh_interval_sec"],
@@ -1421,6 +1640,11 @@ class DreamAlphaDaemon:
             "mutation_multiplier": cfg["mutation_multiplier"],
             "simulation_concurrency": cfg["simulation_concurrency"],
             "max_operator_calls": cfg["max_operator_calls"],
+            "max_expression_fields": cfg["max_expression_fields"],
+            "enable_llm_repair": cfg["enable_llm_repair"],
+            "repair_attempts": cfg["repair_attempts"],
+            "mutation_keep_ratio": cfg["mutation_keep_ratio"],
+            "strict_quota_enabled": cfg["strict_quota_enabled"],
             "no_success_notify_every": cfg["no_success_notify_every"],
             "no_success_notify_cooldown_sec": cfg["no_success_notify_cooldown_sec"],
             "single_dataset_only": cfg["single_dataset_only"],
@@ -1434,6 +1658,8 @@ class DreamAlphaDaemon:
             "pg_seed_min_fitness": cfg["pg_seed_min_fitness"],
             "pg_seed_min_turnover": cfg["pg_seed_min_turnover"],
             "pg_seed_max_turnover": cfg["pg_seed_max_turnover"],
+            "learning_seed_sharpe_min": cfg["learning_seed_sharpe_min"],
+            "learning_seed_fitness_min": cfg["learning_seed_fitness_min"],
             "seed_file": cfg["seed_file"],
             "cursor_file": cfg["cursor_file"],
             "high_template_file": cfg["high_template_file"],
@@ -1442,6 +1668,7 @@ class DreamAlphaDaemon:
             "fields_count": len(cfg.get("fields") or []),
             "context": cfg.get("context") or {},
             "notify_url_set": bool(cfg.get("notify_url")),
+            "push_all_console_notifications": cfg.get("push_all_console_notifications", True),
         }
 
     def _persist_state_locked(self) -> None:
@@ -1470,6 +1697,10 @@ class DreamAlphaDaemon:
         events.append(event)
         if len(events) > max_events:
             del events[:-max_events]
+        if _to_bool(self._cfg.get("push_all_console_notifications"), True):
+            line = self._event_brief(event)
+            if line:
+                self._notify_async("CONSOLE", line)
 
     def _inc_stat_locked(self, key: str, delta: int = 1) -> None:
         stats = self._state.setdefault("stats", {})
@@ -1511,12 +1742,56 @@ class DreamAlphaDaemon:
                     return
                 errors.append(f"{mode}: http {resp.status_code}")
             except Exception as exc:
-                errors.append(f"{mode}: {exc}")
+                err_type = type(exc).__name__
+                err_msg = str(exc)
+                if len(err_msg) > 160:
+                    err_msg = err_msg[:157] + "..."
+                errors.append(f"{mode}: {err_type} {err_msg}")
 
         # throttle transport warning logs to avoid noisy flooding
         if now_ts - self._last_notify_transport_warn_ts >= 60:
             self._last_notify_transport_warn_ts = now_ts
             logger.warning("Notification push failed after retries: %s", " | ".join(errors))
+
+    def _notify_async(self, title: str, body: str, force: bool = False) -> None:
+        if not self._notify_url():
+            return
+        def _run() -> None:
+            try:
+                self._notify(title, body, force=force)
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _event_brief(self, event: Dict[str, Any]) -> str:
+        if not isinstance(event, dict):
+            return ""
+        event_type = str(event.get("type") or "-")
+        stage = str(event.get("stage") or "-")
+        parts = [f"{event_type}/{stage}"]
+        slot = event.get("slot")
+        if slot is not None:
+            parts.append(f"slot={_to_int(slot, 0)}")
+        if "sharpe" in event:
+            parts.append(f"sharpe={_to_float(event.get('sharpe'), 0.0):.3f}")
+        if "fitness" in event:
+            parts.append(f"fitness={_to_float(event.get('fitness'), 0.0):.3f}")
+        if event.get("message"):
+            msg = str(event.get("message") or "")
+            if len(msg) > 220:
+                msg = msg[:217] + "..."
+            parts.append(msg)
+        elif event.get("errors"):
+            errs = event.get("errors")
+            if isinstance(errs, list) and errs:
+                msg = str(errs[0])
+                if len(msg) > 220:
+                    msg = msg[:217] + "..."
+                parts.append(msg)
+        line = " | ".join(parts).strip()
+        if len(line) > 320:
+            line = line[:317] + "..."
+        return line
 
     def _normalize_seed_file(self, seed_file: Path) -> Dict[str, Any]:
         raw = _safe_read_json(seed_file, {})
@@ -1592,6 +1867,10 @@ class DreamAlphaDaemon:
         for _, item in enriched[:max_count]:
             expr = str(item.get("expression") or "").strip()
             if not expr:
+                continue
+            if "{" in expr or "}" in expr or "same_dataset" in expr.lower():
+                continue
+            if _violates_simple_operator_policy(expr):
                 continue
             sharpe = _to_float(item.get("sharpe"), 0.0)
             fitness = _to_float(item.get("fitness"), 0.0)
@@ -1974,33 +2253,62 @@ ON CONFLICT (unique_key) DO UPDATE SET
         core_fields: List[str],
         shortflip_queue: List[str],
         force_count: int,
+        prefer_simple_operators: bool,
+        batch_size: int,
     ) -> str:
-        lines = [
-            str(base_report_text or "").strip(),
-            "",
-            "WQ_BRAIN_ALPHA_OPTIMIZATION_V1 STRICT MODE:",
-            f"- Batch size MUST be exactly {BATCH_SIZE_STRICT}.",
-            "- Baseline lock is DISABLED. Do not anchor to a fixed alpha id or one core field set.",
-            "- Operator budget target <= 8 per expression.",
-            "- Named parameters required for optional arguments.",
-            f"- Current stage: Stage {stage}.",
-            "- Theme coverage per batch: at least 4 distinct themes from A-F.",
-            "- Common operator quota: ts_sum/ts_mean/rank/zscore/winsorize/ts_std_dev/scale/round/trade_when <=2 each batch.",
-            "- Explore slots #6-#8 must use >=2 A-F theme operators each and avoid duplicate theme pairs.",
-            "- Preserve validity first: prefer robust transforms (winsorize/zscore/rank/ts_backfill) for noisy fields.",
-            "- Structural novelty > parameter-only tweaks.",
-            "",
-            "Theme A: trade_when keep if_else nan_mask",
-            "Theme B: days_from_last_change filter group_backfill hump hump_decay jump_decay kth_element last_diff_value ts_backfill",
-            "Theme C: clamp left_tail nan_out pasteurize purify replace right_tail tail truncate winsorize",
-            "Theme D: group_multi_regression group_vector_neut group_vector_proj multi_regression regression_neut regression_proj ts_poly_regression ts_regression ts_theilsen ts_vector_neut ts_vector_proj vector_neut vector_proj",
-            "Theme E: ts_co_kurtosis ts_co_skewness ts_corr ts_covariance ts_partial_corr ts_triple_corr",
-            "Theme F: inst_pnl inst_tvr one_side rank_by_side scale scale_down ts_delta_limit ts_target_tvr_decay ts_target_tvr_delta_limit ts_target_tvr_hump",
-            "",
-            f"Reference expression (soft hint only): {baseline_expression if baseline_expression else '-'}",
-            f"Reference fields (soft hint only): {', '.join(core_fields) if core_fields else '-'}",
-            f"Require at least {max(0, force_count)} short-flip candidates from queue in this round.",
-        ]
+        lines = [str(base_report_text or "").strip(), ""]
+        if prefer_simple_operators:
+            lines.extend(
+                [
+                    "WQ_BRAIN_ALPHA_OPTIMIZATION_V1 SIMPLE-OP MODE:",
+                    f"- Batch size target: {batch_size} per round.",
+                    "- Baseline lock is DISABLED. Do not anchor to one fixed alpha id.",
+                    "- Operator budget target <= 8 per expression, preferred range is 3~6.",
+                    "- Field budget target <= 8 per expression.",
+                    "- Use simple and robust operators first. Preferred set:",
+                    "  rank zscore winsorize ts_rank ts_delta ts_mean ts_std_dev ts_zscore ts_backfill group_rank group_zscore group_neutralize trade_when",
+                    "- Avoid heavy/random operators (especially regression/vector families) unless absolutely necessary.",
+                    "- Avoid weak structures like field/group_sum(field, group) and pure self-normalization clones.",
+                    "- Named parameters required for optional arguments.",
+                    "- When parser errors happen, repair expression before discard.",
+                    "- Batch policy: generate a surplus candidate pool; keep best subset + mutation subset each round.",
+                    f"- Current stage: Stage {stage}.",
+                    "- Structural novelty > parameter-only tweaks.",
+                    "",
+                    f"Reference expression (soft hint only): {baseline_expression if baseline_expression else '-'}",
+                    f"Reference fields (soft hint only): {', '.join(core_fields) if core_fields else '-'}",
+                    f"Require at least {max(0, force_count)} short-flip candidates from queue in this round.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "WQ_BRAIN_ALPHA_OPTIMIZATION_V1 STRICT MODE:",
+                    f"- Batch size target: {batch_size} per round.",
+                    "- Baseline lock is DISABLED. Do not anchor to a fixed alpha id or one core field set.",
+                    "- Operator budget target <= 8 per expression.",
+                    "- Field budget target <= 8 per expression.",
+                    "- Named parameters required for optional arguments.",
+                    "- Batch policy: generate a surplus candidate pool; keep best subset + mutation subset each round.",
+                    f"- Current stage: Stage {stage}.",
+                    "- Theme coverage per batch: at least 4 distinct themes from A-F.",
+                    "- Common operator quota: ts_sum/ts_mean/rank/zscore/winsorize/ts_std_dev/scale/round/trade_when <=2 each batch.",
+                    "- For large batches, keep tail slots explore-heavy and avoid duplicate theme pairs.",
+                    "- Preserve validity first: prefer robust transforms (winsorize/zscore/rank/ts_backfill) for noisy fields.",
+                    "- Structural novelty > parameter-only tweaks.",
+                    "",
+                    "Theme A: trade_when keep if_else nan_mask",
+                    "Theme B: days_from_last_change filter group_backfill hump hump_decay jump_decay kth_element last_diff_value ts_backfill",
+                    "Theme C: clamp left_tail nan_out pasteurize purify replace right_tail tail truncate winsorize",
+                    "Theme D: group_multi_regression group_vector_neut group_vector_proj multi_regression regression_neut regression_proj ts_poly_regression ts_regression ts_theilsen ts_vector_neut ts_vector_proj vector_neut vector_proj",
+                    "Theme E: ts_co_kurtosis ts_co_skewness ts_corr ts_covariance ts_partial_corr ts_triple_corr",
+                    "Theme F: inst_pnl inst_tvr one_side rank_by_side scale scale_down ts_delta_limit ts_target_tvr_decay ts_target_tvr_delta_limit ts_target_tvr_hump",
+                    "",
+                    f"Reference expression (soft hint only): {baseline_expression if baseline_expression else '-'}",
+                    f"Reference fields (soft hint only): {', '.join(core_fields) if core_fields else '-'}",
+                    f"Require at least {max(0, force_count)} short-flip candidates from queue in this round.",
+                ]
+            )
         if stage == "A":
             lines.extend(
                 [
@@ -2009,11 +2317,10 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 ]
             )
         else:
-            lines.extend(
-                [
-                    "- Stage B: slots #1-#5 may fine-tune, slots #6-#8 must stay explore-heavy.",
-                ]
-            )
+            if prefer_simple_operators:
+                lines.append("- Stage B: fine-tune simple operators and horizons first, avoid unnecessary operator expansion.")
+            else:
+                lines.append("- Stage B: slots #1-#5 may fine-tune, slots #6-#8 must stay explore-heavy.")
 
         if shortflip_queue:
             lines.append(f"- Short-flip queue seeds: {len(shortflip_queue)}")
@@ -2021,6 +2328,73 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 lines.append(f"  * flip_source: {expr}")
 
         return "\n".join([line for line in lines if line is not None]).strip()
+
+    def _prefetch_candidate_pool(
+        self,
+        brain: Dict[str, Any],
+        fields: List[Dict[str, Any]],
+        report_text: str,
+        patterns: Optional[List[Dict[str, Any]]],
+        context: Dict[str, Any],
+        operators: List[Dict[str, Any]],
+        count: int,
+        attempts: int,
+        stop_event: threading.Event,
+    ) -> Dict[str, Any]:
+        target_count = max(1, _to_int(count, 1))
+        max_attempts = max(1, min(6, _to_int(attempts, 1)))
+        generated: List[Dict[str, Any]] = []
+        seen_expr: Set[str] = set()
+        raw_generated = 0
+        last_error = ""
+
+        generator = AlphaGenerator(brain)
+        prompt_context = dict(context or {})
+        prompt_context["prefetch_mode"] = True
+
+        for attempt_idx in range(max_attempts):
+            if stop_event.is_set():
+                break
+            try:
+                batch_raw = generator.generate_alphas(
+                    fields=[dict(item) for item in (fields or [])],
+                    report_text=report_text,
+                    patterns=patterns,
+                    context=prompt_context,
+                    operators=operators or None,
+                    count=target_count,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt_idx + 1 < max_attempts and not stop_event.is_set():
+                    time.sleep(min(2, attempt_idx + 1))
+                continue
+
+            batch = batch_raw if isinstance(batch_raw, list) else []
+            raw_generated += len(batch)
+            for candidate in batch:
+                if not isinstance(candidate, dict):
+                    continue
+                expr = _normalize_expression(str(candidate.get("expression") or ""))
+                if not expr or expr in seen_expr:
+                    continue
+                seen_expr.add(expr)
+                item = dict(candidate)
+                item["expression"] = expr
+                item["_prefetch"] = True
+                generated.append(item)
+                if len(generated) >= target_count:
+                    return {
+                        "candidates": generated,
+                        "raw_generated": raw_generated,
+                        "error": "",
+                    }
+
+        return {
+            "candidates": generated,
+            "raw_generated": raw_generated,
+            "error": last_error,
+        }
 
     def _meets_performance_gate(
         self,
@@ -2257,6 +2631,9 @@ ON CONFLICT (unique_key) DO UPDATE SET
             core_datasets: List[str] = []
             allowed_fields: List[str] = []
             shortflip_queue: List[str] = []
+            candidate_backlog: List[Dict[str, Any]] = []
+            prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dream-prefetch")
+            prefetch_future: Optional[Any] = None
             round_index = 0
             no_success_streak = 0
             current_cycle = 0
@@ -2338,6 +2715,54 @@ ON CONFLICT (unique_key) DO UPDATE SET
 
             while not stop_event.is_set():
                 now_ts = time.time()
+                prefetch_backlog_limit = max(
+                    max(1, _to_int(cfg.get("generation_count"), DEFAULT_GENERATION_COUNT)) * 8,
+                    40,
+                )
+                if prefetch_future is not None and prefetch_future.done():
+                    prefetch_payload: Dict[str, Any] = {}
+                    prefetch_error = ""
+                    try:
+                        maybe_payload = prefetch_future.result()
+                        if isinstance(maybe_payload, dict):
+                            prefetch_payload = maybe_payload
+                    except Exception as exc:
+                        prefetch_error = str(exc)
+                    prefetch_future = None
+
+                    incoming_prefetch = prefetch_payload.get("candidates") if isinstance(prefetch_payload, dict) else []
+                    incoming_count = 0
+                    if isinstance(incoming_prefetch, list) and incoming_prefetch:
+                        incoming_count = len(incoming_prefetch)
+                        candidate_backlog = _merge_candidate_backlog(
+                            existing=candidate_backlog,
+                            incoming=incoming_prefetch,
+                            limit=prefetch_backlog_limit,
+                        )
+                    raw_prefetch = _to_int(
+                        prefetch_payload.get("raw_generated"),
+                        incoming_count,
+                    ) if isinstance(prefetch_payload, dict) else incoming_count
+                    if isinstance(prefetch_payload, dict) and prefetch_payload.get("error"):
+                        prefetch_error = str(prefetch_payload.get("error") or "")
+
+                    with self._lock:
+                        if incoming_count > 0:
+                            self._inc_stat_locked("prefetch_ready", incoming_count)
+                        if prefetch_error:
+                            self._inc_stat_locked("prefetch_errors", 1)
+                        event = {
+                            "at": _utc_now(),
+                            "type": "prefetch",
+                            "stage": "done",
+                            "raw_generated": raw_prefetch,
+                            "prefetched": incoming_count,
+                            "backlog_size": len(candidate_backlog),
+                        }
+                        if prefetch_error:
+                            event["message"] = prefetch_error[:280]
+                        self._append_event_locked(event)
+                        self._persist_state_locked()
 
                 need_auth = (not auth_ok) or ((now_ts - auth_last_ts) >= auth_refresh_interval_sec)
                 if need_auth:
@@ -2625,7 +3050,9 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         known_signatures.add(sig)
 
                 stage = self._resolve_stage(best_sharpe, best_fitness)
-                force_shortflip_count = 2 if shortflip_queue else 0
+                prefer_simple_operators = _to_bool(cfg.get("prefer_simple_operators"), True)
+                target_count = max(1, _to_int(cfg.get("generation_count"), DEFAULT_GENERATION_COUNT))
+                force_shortflip_count = min(2, target_count) if shortflip_queue else 0
                 seed_lines = self._seed_prompt_lines(seed_items, cfg.get("max_seed_in_prompt", 20))
                 strict_report_text = self._build_strict_report_text(
                     base_report_text=cfg.get("report_text") or "",
@@ -2634,39 +3061,91 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     core_fields=core_fields,
                     shortflip_queue=shortflip_queue,
                     force_count=force_shortflip_count,
+                    prefer_simple_operators=prefer_simple_operators,
+                    batch_size=target_count,
                 )
                 hint_lines = ["Seed Library Signals:", *seed_lines]
                 combined_report = (strict_report_text + "\n\n" + "\n".join(hint_lines)).strip()
 
                 generation_context = dict(cfg.get("context") or {})
-                generation_context["mutation_mode"] = "max"
+                generation_context["mutation_mode"] = "balanced" if prefer_simple_operators else "max"
                 generation_context["single_dataset_only"] = _to_bool(cfg.get("single_dataset_only"), True)
                 generation_context["max_operator_calls"] = int(cfg.get("max_operator_calls", 8))
+                generation_context["max_expression_fields"] = int(cfg.get("max_expression_fields", 8))
                 generation_context["stage"] = stage
-                generation_context["strict_batch_size"] = BATCH_SIZE_STRICT
+                generation_context["strict_batch_size"] = target_count
+                generation_context["prefer_simple_operators"] = prefer_simple_operators
                 if baseline_expression:
                     generation_context["reference_expression"] = baseline_expression
 
-                target_count = BATCH_SIZE_STRICT
                 generation_attempts = max(int(cfg.get("generation_attempts", 3)), 3)
                 mutation_multiplier = int(cfg.get("mutation_multiplier", 3))
                 request_count = max(target_count, target_count * mutation_multiplier)
+                pool_target = request_count
                 raw_generated_total = 0
                 single_dataset_skipped = 0
                 structure_skipped = 0
                 operator_limit_skipped = 0
+                field_limit_skipped = 0
                 core_lock_skipped = 0
                 stage_tune_skipped = 0
                 local_invalid_skipped = 0
+                low_info_skipped = 0
+                weak_structure_skipped = 0
+                simple_policy_skipped = 0
+                repair_requested = 0
+                repair_success = 0
                 generated: List[Dict[str, Any]] = []
                 candidate_exprs = set()
                 candidate_sigs = set()
                 generate_error: Optional[Exception] = None
                 shortflip_generated_count = 0
+                max_expression_fields = max(1, _to_int(cfg.get("max_expression_fields"), 8))
+                enable_llm_repair = _to_bool(cfg.get("enable_llm_repair"), True)
+                repair_attempts = max(0, _to_int(cfg.get("repair_attempts"), 1))
+                backlog_reused = 0
+                backlog_limit = max(target_count * 8, 40)
+
+                if candidate_backlog:
+                    remaining_backlog: List[Dict[str, Any]] = []
+                    for item in candidate_backlog:
+                        if len(generated) >= pool_target:
+                            remaining_backlog.append(item)
+                            continue
+                        if not isinstance(item, dict):
+                            continue
+                        expr = _normalize_expression(str(item.get("expression") or ""))
+                        if not expr or expr in known_exprs or expr in candidate_exprs:
+                            continue
+                        sig = _expression_structure_signature(expr, field_ids_for_detection)
+                        if sig and (sig in known_signatures or sig in candidate_sigs):
+                            continue
+                        reused = dict(item)
+                        reused["expression"] = expr
+                        if not isinstance(reused.get("_used_fields"), list):
+                            reused["_used_fields"] = _extract_expression_fields(expr, field_ids_for_detection)
+                        if not isinstance(reused.get("_opcheck"), dict):
+                            reused["_opcheck"] = _validate_expression_locally(
+                                expr,
+                                operator_index,
+                                int(cfg.get("max_operator_calls", 8)),
+                            )
+                        reused["_structure_sig"] = sig
+                        reused["_operator_calls"] = int(
+                            reused.get("_operator_calls")
+                            or _to_int(_dig(reused, ["_opcheck", "operator_calls"]), 0)
+                            or _count_operator_calls(expr)
+                        )
+                        generated.append(reused)
+                        candidate_exprs.add(expr)
+                        if sig:
+                            candidate_sigs.add(sig)
+                        backlog_reused += 1
+                    candidate_backlog = remaining_backlog
 
                 if shortflip_queue:
                     queue_copy = list(shortflip_queue)
-                    while queue_copy and len(generated) < min(target_count, force_shortflip_count):
+                    while queue_copy and len(generated) < min(pool_target, force_shortflip_count):
                         src_expr = _normalize_expression(queue_copy.pop(0))
                         if not src_expr:
                             continue
@@ -2675,12 +3154,19 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             _normalize_expression(f"negate({src_expr})"),
                         ]
                         for flip_expr in flip_variants:
-                            if len(generated) >= min(target_count, force_shortflip_count):
+                            if len(generated) >= min(pool_target, force_shortflip_count):
                                 break
                             if not flip_expr or flip_expr in known_exprs or flip_expr in candidate_exprs:
                                 continue
                             if stage == "A" and baseline_expression and _is_pure_parameter_tweak(flip_expr, baseline_expression):
                                 stage_tune_skipped += 1
+                                continue
+                            shortflip_fields = _extract_expression_fields(flip_expr, field_ids_for_detection)
+                            if not shortflip_fields:
+                                single_dataset_skipped += 1
+                                continue
+                            if len(shortflip_fields) > max_expression_fields:
+                                field_limit_skipped += 1
                                 continue
                             validation = _validate_expression_locally(
                                 flip_expr,
@@ -2700,7 +3186,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                                     "logic": "CAND_SHORTFLIP from negative signal",
                                     "expression": flip_expr,
                                     "_structure_sig": sig,
-                                    "_used_fields": _extract_expression_fields(flip_expr, field_ids_for_detection),
+                                    "_used_fields": shortflip_fields,
                                     "_operator_calls": int(validation.get("operator_calls") or _count_operator_calls(flip_expr)),
                                     "_opcheck": validation,
                                     "_tags": ["CAND_SHORTFLIP"],
@@ -2715,7 +3201,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 for attempt in range(max(generation_attempts, 5)):
                     if stop_event.is_set():
                         break
-                    if len(generated) >= target_count:
+                    if len(generated) >= pool_target:
                         break
                     try:
                         generated_raw = generator.generate_alphas(
@@ -2737,62 +3223,149 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     for candidate in batch:
                         if not isinstance(candidate, dict):
                             continue
-                        expr = _normalize_expression(str(candidate.get("expression") or ""))
-                        if not expr:
+                        original_expr = _normalize_expression(str(candidate.get("expression") or ""))
+                        if not original_expr:
                             continue
-                        if expr in known_exprs or expr in candidate_exprs:
+                        if original_expr in known_exprs or original_expr in candidate_exprs:
                             continue
-                        if stage == "A" and baseline_expression and _is_pure_parameter_tweak(expr, baseline_expression):
+                        if stage == "A" and baseline_expression and _is_pure_parameter_tweak(original_expr, baseline_expression):
                             stage_tune_skipped += 1
                             continue
-                        op_calls = _count_operator_calls(expr)
-                        if op_calls > int(cfg.get("max_operator_calls", 8)):
-                            operator_limit_skipped += 1
-                            continue
-                        used_fields = _extract_expression_fields(expr, field_ids_for_detection)
-                        if not used_fields:
-                            single_dataset_skipped += 1
-                            continue
+                        expr = original_expr
+                        repaired_by_llm = False
+                        repair_round = 0
+                        max_op_calls = int(cfg.get("max_operator_calls", 8))
 
-                        if _to_bool(cfg.get("single_dataset_only"), True):
-                            datasets = set(
-                                str(field_to_dataset.get(fid) or "").strip()
-                                for fid in used_fields
-                                if str(field_to_dataset.get(fid) or "").strip()
-                            )
-                            unresolved = [fid for fid in used_fields if not str(field_to_dataset.get(fid) or "").strip()]
-                            if len(datasets) > 1 or (len(used_fields) > 1 and unresolved):
-                                single_dataset_skipped += 1
-                                continue
+                        while True:
+                            op_calls = _count_operator_calls(expr)
+                            used_fields = _extract_expression_fields(expr, field_ids_for_detection)
+                            sig = _expression_structure_signature(expr, field_ids_for_detection)
+                            validation = _validate_expression_locally(expr, operator_index, max_op_calls)
+                            failure_code = ""
+                            failure_reasons: List[str] = []
 
-                        sig = _expression_structure_signature(expr, field_ids_for_detection)
-                        if sig and (sig in known_signatures or sig in candidate_sigs):
-                            structure_skipped += 1
-                            continue
-                        validation = _validate_expression_locally(
-                            expr,
-                            operator_index,
-                            int(cfg.get("max_operator_calls", 8)),
-                        )
-                        if not validation.get("is_valid"):
-                            local_invalid_skipped += 1
-                            continue
+                            if op_calls > max_op_calls:
+                                failure_code = "operator_limit"
+                                failure_reasons = [f"operator budget exceeded: estimated={op_calls}, limit={max_op_calls}"]
+                            elif not used_fields:
+                                failure_code = "single_dataset"
+                                failure_reasons = ["no valid fields detected in expression"]
+                            elif len(used_fields) > max_expression_fields:
+                                failure_code = "field_limit"
+                                failure_reasons = [f"field budget exceeded: used={len(used_fields)}, limit={max_expression_fields}"]
+                            elif all(_field_is_low_information(fid) for fid in used_fields):
+                                failure_code = "low_info"
+                                failure_reasons = ["all used fields look low-information"]
+                            elif _is_weak_self_normalization(expr, used_fields):
+                                failure_code = "weak_structure"
+                                failure_reasons = ["weak self-normalization structure detected"]
+                            elif _to_bool(cfg.get("single_dataset_only"), True):
+                                datasets = set(
+                                    str(field_to_dataset.get(fid) or "").strip()
+                                    for fid in used_fields
+                                    if str(field_to_dataset.get(fid) or "").strip()
+                                )
+                                unresolved = [fid for fid in used_fields if not str(field_to_dataset.get(fid) or "").strip()]
+                                if len(datasets) > 1 or (len(used_fields) > 1 and unresolved):
+                                    failure_code = "single_dataset"
+                                    failure_reasons = ["single_dataset_only violated"]
+                            if not failure_code and sig and (sig in known_signatures or sig in candidate_sigs):
+                                failure_code = "structure"
+                                failure_reasons = ["duplicate structure signature"]
+                            if not failure_code and not validation.get("is_valid"):
+                                failure_code = "local_invalid"
+                                failure_reasons = list(validation.get("errors") or [])[:6]
+                            if not failure_code and prefer_simple_operators and _violates_simple_operator_policy(expr):
+                                failure_code = "simple_policy"
+                                failure_reasons = ["violates simple operator policy"]
 
-                        normalized_candidate = dict(candidate)
-                        normalized_candidate["expression"] = expr
-                        normalized_candidate["_structure_sig"] = sig
-                        normalized_candidate["_used_fields"] = used_fields
-                        normalized_candidate["_operator_calls"] = int(validation.get("operator_calls") or op_calls)
-                        normalized_candidate["_opcheck"] = validation
-                        normalized_candidate["_tags"] = list(candidate.get("tags") or [])
-                        generated.append(normalized_candidate)
-                        candidate_exprs.add(expr)
-                        if sig:
-                            candidate_sigs.add(sig)
-                        if len(generated) >= target_count:
+                            repairable = failure_code in {"operator_limit", "field_limit", "local_invalid"}
+                            if (
+                                failure_code
+                                and repairable
+                                and enable_llm_repair
+                                and repair_round < repair_attempts
+                            ):
+                                repair_round += 1
+                                repair_requested += 1
+                                try:
+                                    repaired_expr = _normalize_expression(
+                                        generator.repair_expression(
+                                            expression=expr,
+                                            errors=failure_reasons,
+                                            fields=fields_for_generation,
+                                            context=generation_context,
+                                            operators=operators or [],
+                                        )
+                                    )
+                                except Exception:
+                                    repaired_expr = ""
+                                if repaired_expr and repaired_expr != expr and repaired_expr not in known_exprs and repaired_expr not in candidate_exprs:
+                                    expr = repaired_expr
+                                    repaired_by_llm = True
+                                    continue
+
+                            if failure_code:
+                                if failure_code == "operator_limit":
+                                    operator_limit_skipped += 1
+                                elif failure_code == "field_limit":
+                                    field_limit_skipped += 1
+                                elif failure_code == "single_dataset":
+                                    single_dataset_skipped += 1
+                                elif failure_code == "low_info":
+                                    low_info_skipped += 1
+                                elif failure_code == "weak_structure":
+                                    weak_structure_skipped += 1
+                                elif failure_code == "structure":
+                                    structure_skipped += 1
+                                elif failure_code == "simple_policy":
+                                    simple_policy_skipped += 1
+                                else:
+                                    local_invalid_skipped += 1
+                                break
+
+                            normalized_candidate = dict(candidate)
+                            normalized_candidate["expression"] = expr
+                            normalized_candidate["_structure_sig"] = sig
+                            normalized_candidate["_used_fields"] = used_fields
+                            normalized_candidate["_operator_calls"] = int(validation.get("operator_calls") or op_calls)
+                            normalized_candidate["_opcheck"] = validation
+                            tags = list(candidate.get("tags") or [])
+                            if repaired_by_llm:
+                                tags.append("LLM_REPAIRED")
+                                repair_success += 1
+                            normalized_candidate["_tags"] = tags
+                            generated.append(normalized_candidate)
+                            candidate_exprs.add(expr)
+                            if sig:
+                                candidate_sigs.add(sig)
                             break
-                    if len(generated) >= target_count:
+                        if len(generated) >= pool_target:
+                            break
+                    if len(generated) >= pool_target:
                         break
+
+                if len(generated) > target_count:
+                    selected_candidates, next_backlog = _split_candidates_with_mutation(
+                        candidates=generated,
+                        target_count=target_count,
+                        max_operator_calls=int(cfg.get("max_operator_calls", 8)),
+                        max_expression_fields=max_expression_fields,
+                        mutation_ratio=_to_float(cfg.get("mutation_keep_ratio"), 0.4),
+                    )
+                    generated = selected_candidates
+                    candidate_backlog = _merge_candidate_backlog(
+                        existing=candidate_backlog,
+                        incoming=next_backlog,
+                        limit=backlog_limit,
+                    )
+                elif generated:
+                    # Keep whatever backlog remains for the next cycle.
+                    candidate_backlog = _merge_candidate_backlog(
+                        existing=candidate_backlog,
+                        incoming=[],
+                        limit=backlog_limit,
+                    )
 
                 if not generated and generate_error is not None:
                     failure_streak += 1
@@ -2825,7 +3398,14 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     self._inc_stat_locked("single_dataset_skipped", single_dataset_skipped)
                     self._inc_stat_locked("structure_skipped", structure_skipped)
                     self._inc_stat_locked("operator_limit_skipped", operator_limit_skipped)
+                    self._inc_stat_locked("field_limit_skipped", field_limit_skipped)
                     self._inc_stat_locked("local_invalid", local_invalid_skipped)
+                    if backlog_reused > 0:
+                        self._inc_stat_locked("backlog_reused", backlog_reused)
+                    if repair_requested > 0:
+                        self._inc_stat_locked("repair_requested", repair_requested)
+                    if repair_success > 0:
+                        self._inc_stat_locked("repair_success", repair_success)
                     if shortflip_generated_count > 0:
                         self._inc_stat_locked("shortflip_generated", shortflip_generated_count)
                     self._append_event_locked(
@@ -2838,9 +3418,17 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             "single_dataset_skipped": single_dataset_skipped,
                             "structure_skipped": structure_skipped,
                             "operator_limit_skipped": operator_limit_skipped,
+                            "field_limit_skipped": field_limit_skipped,
                             "core_lock_skipped": core_lock_skipped,
                             "stage_tune_skipped": stage_tune_skipped,
                             "local_invalid_skipped": local_invalid_skipped,
+                            "low_info_skipped": low_info_skipped,
+                            "weak_structure_skipped": weak_structure_skipped,
+                            "simple_policy_skipped": simple_policy_skipped,
+                            "backlog_reused": backlog_reused,
+                            "backlog_size": len(candidate_backlog),
+                            "repair_requested": repair_requested,
+                            "repair_success": repair_success,
                             "shortflip_generated": shortflip_generated_count,
                         }
                     )
@@ -2868,6 +3456,12 @@ ON CONFLICT (unique_key) DO UPDATE SET
                                 "core_lock_skipped": core_lock_skipped,
                                 "stage_tune_skipped": stage_tune_skipped,
                                 "local_invalid_skipped": local_invalid_skipped,
+                                "field_limit_skipped": field_limit_skipped,
+                                "low_info_skipped": low_info_skipped,
+                                "weak_structure_skipped": weak_structure_skipped,
+                                "simple_policy_skipped": simple_policy_skipped,
+                                "repair_requested": repair_requested,
+                                "repair_success": repair_success,
                             }
                         )
                         self._persist_state_locked()
@@ -2876,25 +3470,27 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     continue
 
                 generated = generated[:target_count]
-                quota_report = _check_batch_quotas(
-                    [str(item.get("expression") or "") for item in generated],
-                    stage=stage,
-                )
-                if not quota_report.get("ok"):
-                    with self._lock:
-                        self._inc_stat_locked("quota_rebuilds", 1)
-                        self._append_event_locked(
-                            {
-                                "at": _utc_now(),
-                                "type": "warn",
-                                "stage": "quota",
-                                "errors": list(quota_report.get("errors") or []),
-                            }
-                        )
-                        self._persist_state_locked()
-                    mark_no_success("quota_reject", "; ".join(str(x) for x in list(quota_report.get("errors") or [])[:2]))
-                    time.sleep(min(15, cfg["interval_sec"]))
-                    continue
+                if (not prefer_simple_operators) and _to_bool(cfg.get("strict_quota_enabled"), False):
+                    quota_report = _check_batch_quotas(
+                        [str(item.get("expression") or "") for item in generated],
+                        stage=stage,
+                        batch_size=target_count,
+                    )
+                    if not quota_report.get("ok"):
+                        with self._lock:
+                            self._inc_stat_locked("quota_rebuilds", 1)
+                            self._append_event_locked(
+                                {
+                                    "at": _utc_now(),
+                                    "type": "warn",
+                                    "stage": "quota",
+                                    "errors": list(quota_report.get("errors") or []),
+                                }
+                            )
+                            self._persist_state_locked()
+                        mark_no_success("quota_reject", "; ".join(str(x) for x in list(quota_report.get("errors") or [])[:2]))
+                        time.sleep(min(15, cfg["interval_sec"]))
+                        continue
 
                 settings = self._build_settings_from_context(cfg.get("context") or {})
                 max_wait_sec = int(cfg.get("max_wait_sec", 1800))
@@ -2986,7 +3582,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                                 "at": _utc_now(),
                                 "type": "warn",
                                 "stage": "preflight",
-                                "message": "unable to build strict 8 validated candidates",
+                                "message": f"unable to build validated candidates (need={target_count})",
                                 "failures": local_validation_failures[:8],
                             }
                         )
@@ -3029,6 +3625,34 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         del sigs[:-30000]
                     self._inc_cursor_locked("candidate", len(dispatch_tasks))
                     self._persist_state_locked()
+
+                if prefetch_future is None and not stop_event.is_set():
+                    prefetch_count = max(target_count, target_count * mutation_multiplier)
+                    prefetch_attempts = max(1, min(generation_attempts, 3))
+                    prefetch_patterns = list(patterns) if isinstance(patterns, list) else patterns
+                    prefetch_future = prefetch_executor.submit(
+                        self._prefetch_candidate_pool,
+                        brain=dict(brain),
+                        fields=[dict(item) for item in fields_for_generation],
+                        report_text=combined_report,
+                        patterns=prefetch_patterns,
+                        context=dict(generation_context),
+                        operators=[dict(op) for op in (operators or []) if isinstance(op, dict)],
+                        count=prefetch_count,
+                        attempts=prefetch_attempts,
+                        stop_event=stop_event,
+                    )
+                    with self._lock:
+                        self._append_event_locked(
+                            {
+                                "at": _utc_now(),
+                                "type": "prefetch",
+                                "stage": "start",
+                                "target": prefetch_count,
+                                "attempts": prefetch_attempts,
+                            }
+                        )
+                        self._persist_state_locked()
 
                 batch_results: List[Dict[str, Any]] = []
                 simulation_error: Optional[Exception] = None
@@ -3301,7 +3925,15 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         self._state["last_error"] = ""
                         self._persist_state_locked()
 
-                    if accepted:
+                    learning_seed = (
+                        (
+                            abs(sharpe) >= float(cfg.get("learning_seed_sharpe_min", 0.20))
+                            or fitness >= float(cfg.get("learning_seed_fitness_min", 0.05))
+                        )
+                        and platform_operator_count <= int(cfg.get("max_operator_calls", 8))
+                        and ("OPERATOR_COUNT" not in fail_items)
+                    )
+                    if accepted or learning_seed:
                         if not any(str(it.get("expression") or "") == expr for it in seed_items):
                             seed_items.append(
                                 {
@@ -3311,7 +3943,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                                     "sharpe": sharpe,
                                     "fitness": fitness,
                                     "created_at": _utc_now(),
-                                    "source": "dream_alpha_loop",
+                                    "source": "dream_alpha_loop" if accepted else "dream_alpha_learning",
                                     "alpha_id": alpha_id,
                                     "simulation_id": simulation_id,
                                 }
@@ -3388,7 +4020,10 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 if stage == "A":
                     next_actions.append("stay Stage A structural exploration (fine-tune forbidden)")
                 else:
-                    next_actions.append("Stage B enabled: keep #6-#8 explore-heavy")
+                    if prefer_simple_operators:
+                        next_actions.append("Stage B enabled: keep operators simple and tune horizons/thresholds")
+                    else:
+                        next_actions.append("Stage B enabled: keep #6-#8 explore-heavy")
                 if any(
                     _to_int(item.get("platform_operator_count"), -1) > int(cfg.get("max_operator_calls", 8))
                     for item in round_items_for_file
@@ -3473,6 +4108,17 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 self._persist_state_locked()
             self._notify("ERROR fatal", str(exc), force=True)
         finally:
+            try:
+                if "prefetch_future" in locals():
+                    maybe_prefetch_future = locals().get("prefetch_future")
+                    if maybe_prefetch_future is not None and not maybe_prefetch_future.done():
+                        maybe_prefetch_future.cancel()
+                if "prefetch_executor" in locals():
+                    maybe_prefetch_executor = locals().get("prefetch_executor")
+                    if maybe_prefetch_executor is not None:
+                        maybe_prefetch_executor.shutdown(wait=False)
+            except Exception:
+                pass
             with self._lock:
                 self._state["running"] = False
                 self._state["stopping"] = False

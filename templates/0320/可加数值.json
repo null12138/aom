@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "template_id": "可加数值",
-  "template": "<data_field/> / group_sum(<data_field/>,<gp/>)\n",
+  "template": "group_rank(zscore(ts_backfill(<data_field/>, 63)), <gp/>)\n",
   "fill_rules": {
     "data_field": [
       "aggregate_director_compensation",

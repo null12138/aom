@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "template_id": "SUE",
-  "template": "ts_av_diff(<sue/>, <d1/>)/ts_std_dev(<sue/>, <d2/>)",
+  "template": "rank(ts_delta(ts_backfill(<sue/>, <d2/>), <d1/>))",
   "fill_rules": {
     "sue": [
       "oth327_mktcap",

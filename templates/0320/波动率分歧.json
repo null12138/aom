@@ -1,7 +1,7 @@
 {
   "schema_version": "0.1",
   "template_id": "波动率分歧",
-  "template": "<group_op/>(power(<ts_op/>(abs(<data/>),<day1/>),2)-power(<ts_op/>(<data/>,<day1/>),2),<group/>)\n",
+  "template": "group_rank(zscore(ts_std_dev(ts_delta(ts_backfill(<data/>, 63), 1), <day1/>)), <group/>)\n",
   "fill_rules": {
     "group_op": [
       "group_neutralize",

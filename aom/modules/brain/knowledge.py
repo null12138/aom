@@ -53,6 +53,20 @@ PATTERNS: List[AlphaPattern] = [
         description="观察两个相关指标之间的背离。",
         template="ts_rank(<field1/>, <d1/>) - ts_rank(<field2/>, <d1/>)",
         tags=["cross-sectional", "divergence"]
+    ),
+    AlphaPattern(
+        id="financial_backfill_group_ts",
+        name="财务回填-分组-时序模板",
+        description="先回填财务字段，再做分组变换，最后做时序算子，结构稳定且便于扩展。",
+        template="<ts_operator/>(<group_operator/>(ts_backfill(<mixdata/>, 90), industry), <window/>)",
+        tags=["template", "fundamental", "group", "timeseries"]
+    ),
+    AlphaPattern(
+        id="financial_delta_group_rank",
+        name="财务变化率分组排序模板",
+        description="对回填后的财务字段取变化率，再行业分组排序，常用于低频基本面信号。",
+        template="group_rank(ts_delta(ts_backfill(<mixdata/>, 90), <d1/>), industry)",
+        tags=["template", "fundamental", "simple-op"]
     )
 ]
 
