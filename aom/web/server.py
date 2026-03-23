@@ -375,6 +375,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 state, processed = run_submitter_concurrent(
                     state=state,
                     adapter=adapter,
+                    start_index=int(start_index) if start_index is not None else 0,
                     max_items=int(max_items) if max_items else None,
                     retry_failed=bool(payload.get("retry_failed")),
                     concurrency=concurrency,
@@ -384,6 +385,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 state, processed = run_submitter(
                     state=state,
                     adapter=adapter,
+                    start_index=int(start_index) if start_index is not None else 0,
                     max_items=int(max_items) if max_items else None,
                     retry_failed=bool(payload.get("retry_failed")),
                     db_path=db_path,

@@ -307,6 +307,7 @@ def run_submitter_concurrent(
     batch_size: int = 3,
     db_path: Optional[Path] = None,
     source_file: Optional[Path] = None,
+    start_index: int = 0,
     max_items: Optional[int] = None,
     retry_failed: bool = False,
     stop_event: Optional[threading.Event] = None,
@@ -325,10 +326,18 @@ def run_submitter_concurrent(
     
     if on_progress: on_progress({"status": "LOADING", "expression": "正在加载因子..."})
     
+    try:
+        normalized_start = max(0, int(start_index or 0))
+    except (TypeError, ValueError):
+        normalized_start = 0
+
     if state.get("mode") == "stream" and source_file:
         factors_iter = iter_factors(source_file, start_index=state.get("cursor", 0))
     else:
         pending_queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
+        if normalized_start > 0:
+            pending_queue = pending_queue[normalized_start:]
+            state["queue"] = pending_queue
         def _q_iter():
             for i, it in enumerate(list(pending_queue)):
                 yield i, it
@@ -396,12 +405,20 @@ def run_submitter(
     state: Dict[str, Any],
     adapter: SubmissionAdapter,
     db_path: Optional[Path] = None,
+    start_index: int = 0,
     max_items: Optional[int] = None,
     retry_failed: bool = False,
     stop_event: Optional[threading.Event] = None,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[Dict[str, Any], int]:
     queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
+    try:
+        normalized_start = max(0, int(start_index or 0))
+    except (TypeError, ValueError):
+        normalized_start = 0
+    if normalized_start > 0:
+        queue = queue[normalized_start:]
+        state["queue"] = queue
     processed = 0
     lib_conn = lib_connect(db_path) if db_path else None
     if lib_conn: lib_init_db(lib_conn)

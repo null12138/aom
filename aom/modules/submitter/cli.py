@@ -47,7 +47,7 @@ def add_submit_subparser(subparsers: argparse._SubParsersAction) -> None:
     run_parser.add_argument("--concurrency", type=int, default=1, help="concurrent workers (1-8)")
     run_parser.add_argument("--batch-size", type=int, default=1, help="batch size for multiple mode (1-10)")
     run_parser.add_argument("--ordered", action="store_true", help="ordered sequential by index")
-    run_parser.add_argument("--start", type=int, default=-1, help="start index (ordered mode)")
+    run_parser.add_argument("--start", type=int, default=-1, help="start index (ordered: absolute index, queue/concurrent: skip first N pending)")
     run_parser.add_argument("--legacy-queue", action="store_true", help="use legacy queue mode")
     run_parser.add_argument("--retry-failed", action="store_true", help="retry failed items marked retryable")
     run_parser.add_argument("--library", default="db/factor_library.db", help="library db path for persistence/dedup")
@@ -202,6 +202,7 @@ def submit_run(args: argparse.Namespace) -> int:
         return 1
     
     db_to_pass = library_path if library_path else None
+    queue_start = args.start if args.start >= 0 else 0
 
     try:
         if ordered:
@@ -224,20 +225,26 @@ def submit_run(args: argparse.Namespace) -> int:
             )
         elif (args.concurrency and args.concurrency > 1) or (args.batch_size and args.batch_size > 1):
             print(f"run mode: concurrent multiple (concurrency={args.concurrency}, batch_size={args.batch_size})")
+            if queue_start > 0:
+                print(f"queue start offset: {queue_start}")
             state, processed = run_submitter_concurrent(
                 state=state,
                 adapter=adapter,
                 concurrency=args.concurrency,
                 batch_size=args.batch_size,
+                start_index=queue_start,
                 retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
                 source_file=Path(args.file) if args.file else None,
             )
         else:
             print("run mode: single submit")
+            if queue_start > 0:
+                print(f"queue start offset: {queue_start}")
             state, processed = run_submitter(
                 state=state,
                 adapter=adapter,
+                start_index=queue_start,
                 retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
             )
