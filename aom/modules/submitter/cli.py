@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, List
 
 from ...config import ConfigError, load_config
 from ..library.engine import connect as lib_connect, init_db as lib_init_db, load_fingerprints as lib_load_fingerprints
@@ -37,8 +40,8 @@ def add_submit_subparser(subparsers: argparse._SubParsersAction) -> None:
     init_parser.add_argument("--start", type=int, default=0, help="start index for ordered mode")
 
     run_parser = submit_sub.add_parser("run", help="run submitter")
-    run_parser.add_argument("--file", default="", help="factors JSON file (for new run)")
-    run_parser.add_argument("--state", default="", help="state JSON file (optional)")
+    run_parser.add_argument("--file", default="", help="factors JSON file (for new run, optional in interactive wizard)")
+    run_parser.add_argument("--state", default="", help="state JSON file (optional, auto-generated in wizard)")
     run_parser.add_argument("--run-id", default="", help="run id when creating state")
     run_parser.add_argument("--max-wait", type=int, default=1800, help="max wait seconds for brain mode")
     run_parser.add_argument("--concurrency", type=int, default=1, help="concurrent workers (1-8)")
@@ -48,8 +51,12 @@ def add_submit_subparser(subparsers: argparse._SubParsersAction) -> None:
     run_parser.add_argument("--legacy-queue", action="store_true", help="use legacy queue mode")
     run_parser.add_argument("--retry-failed", action="store_true", help="retry failed items marked retryable")
     run_parser.add_argument("--library", default="db/factor_library.db", help="library db path for persistence/dedup")
+    run_parser.add_argument("--interactive", action="store_true", help="interactive numeric picker for settings overrides")
+    run_parser.add_argument("--instrument-type", help="override instrument type (e.g., EQUITY)")
     run_parser.add_argument("--region", help="override region (e.g., USA, CHN)")
+    run_parser.add_argument("--delay", type=int, help="override delay (e.g., 1)")
     run_parser.add_argument("--universe", help="override universe (e.g., TOP3000)")
+    run_parser.add_argument("--neutralization", help="override neutralization (e.g., INDUSTRY, FAST)")
 
     status_parser = submit_sub.add_parser("status", help="show submitter status")
     status_parser.add_argument("--state", required=True, help="state JSON file")
@@ -112,13 +119,28 @@ def submit_init(args: argparse.Namespace) -> int:
 
 
 def submit_run(args: argparse.Namespace) -> int:
+    try:
+        if not _prepare_run_wizard_args(args):
+            return 1
+    except KeyboardInterrupt:
+        print("\n已取消提交流程。")
+        return 130
+
     state_path = Path(args.state) if args.state else None
     ordered = bool(args.ordered) and not args.legacy_queue
     library_path = Path(args.library) if args.library else None
 
     overrides = {}
+    if args.instrument_type: overrides["instrumentType"] = args.instrument_type
     if args.region: overrides["region"] = args.region
+    if args.delay is not None: overrides["delay"] = args.delay
     if args.universe: overrides["universe"] = args.universe
+    if args.neutralization: overrides["neutralization"] = args.neutralization
+    if args.interactive:
+        if not sys.stdin.isatty():
+            print("--interactive requires a TTY terminal")
+            return 1
+        overrides = _interactive_settings_overrides(overrides)
 
     if state_path and state_path.exists():
         try:
@@ -292,6 +314,252 @@ def _as_bool(value: object, default: bool = False) -> bool:
     if value is None:
         return default
     return bool(value)
+
+
+def _load_settings_options() -> Dict[str, Any]:
+    candidates = [
+        Path("metadata/settings_options.json"),
+        Path(__file__).resolve().parents[3] / "metadata" / "settings_options.json",
+    ]
+    for path in candidates:
+        try:
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    return raw
+        except Exception:
+            continue
+    return {}
+
+
+def _discover_factor_files() -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+    roots = [Path("generated"), Path("runs/uploads"), Path(".")]
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            files = sorted(
+                [p for p in root.glob("*.json") if p.is_file()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            files = []
+        for path in files:
+            text = str(path)
+            if text in seen:
+                continue
+            seen.add(text)
+            candidates.append(text)
+    return candidates
+
+
+def _prompt_text(prompt: str, default: str) -> str:
+    raw = input(f"{prompt} (默认: {default}): ").strip()
+    return raw or default
+
+
+def _prompt_int(prompt: str, default: int, min_value: int, max_value: int) -> int:
+    while True:
+        raw = input(f"{prompt} [{min_value}-{max_value}] (默认: {default}): ").strip()
+        if not raw:
+            return default
+        if raw.isdigit():
+            value = int(raw)
+            if min_value <= value <= max_value:
+                return value
+        print("输入无效，请输入范围内的整数。")
+
+
+def _prompt_yes_no(prompt: str, default: bool) -> bool:
+    mark = "Y/n" if default else "y/N"
+    raw = input(f"{prompt} ({mark}): ").strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes", "1", "true"}
+
+
+def _default_state_path(file_path: str) -> str:
+    base = Path(file_path).stem.strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(Path("runs") / f"submit_state_{base}.json")
+
+
+def _choose_factor_file() -> str:
+    files = _discover_factor_files()
+    if files:
+        print("\n选择因子文件:")
+        for idx, path in enumerate(files[:20], start=1):
+            print(f"  {idx}. {path}")
+        print("  0. 手动输入路径")
+        while True:
+            raw = input(f"输入序号 [0-{min(20, len(files))}]，默认1: ").strip()
+            if not raw:
+                return files[0]
+            if raw.isdigit():
+                pick = int(raw)
+                if pick == 0:
+                    break
+                if 1 <= pick <= min(20, len(files)):
+                    return files[pick - 1]
+            print("输入无效，请输入数字序号。")
+
+    while True:
+        path = input("输入因子文件路径: ").strip()
+        if not path:
+            print("因子文件不能为空。")
+            continue
+        if Path(path).exists():
+            return path
+        print("文件不存在，请重试。")
+
+
+def _prepare_run_wizard_args(args: argparse.Namespace) -> bool:
+    # One-command flow: `python3 -m aom submit run` in TTY opens interactive wizard.
+    wants_wizard = (
+        not args.file
+        and not args.state
+        and not args.interactive
+        and not args.instrument_type
+        and not args.region
+        and args.delay is None
+        and not args.universe
+        and not args.neutralization
+    )
+    if not wants_wizard:
+        return True
+    if not sys.stdin.isatty():
+        print("--file is required when running non-interactively")
+        return False
+
+    print("进入提交流程向导（单命令模式）")
+    selected_file = _choose_factor_file()
+    args.file = selected_file
+    args.state = _prompt_text("状态文件路径", _default_state_path(selected_file))
+    args.concurrency = _prompt_int("并发数", int(args.concurrency), 1, 8)
+    args.batch_size = _prompt_int("批大小", int(args.batch_size), 1, 10)
+    args.max_wait = _prompt_int("单次最大等待秒", int(args.max_wait), 60, 7200)
+    args.ordered = _prompt_yes_no("使用有序流式模式(ordered)", bool(args.ordered))
+    args.interactive = _prompt_yes_no("继续用数字选择 region/universe/neutralization", True)
+    return True
+
+
+def _extract_choice_values(node: Any) -> List[str]:
+    if not isinstance(node, list):
+        return []
+    out: List[str] = []
+    for item in node:
+        value: Any
+        if isinstance(item, dict):
+            value = item.get("value", item.get("label"))
+        else:
+            value = item
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _pick_choice(options: List[str], default_value: str, title: str) -> str:
+    if not options:
+        return default_value
+    default = str(default_value or "").strip()
+    if not default:
+        default = options[0]
+
+    print(f"\n{title}:")
+    for idx, value in enumerate(options, start=1):
+        marker = " (默认)" if value.upper() == default.upper() else ""
+        print(f"  {idx}. {value}{marker}")
+
+    while True:
+        raw = input(f"输入序号 [1-{len(options)}]，回车使用默认({default}): ").strip()
+        if not raw:
+            return default
+        if raw.isdigit():
+            pick = int(raw)
+            if 1 <= pick <= len(options):
+                return options[pick - 1]
+        print("输入无效，请输入数字序号。")
+
+
+def _choices_instrument_type(options: Dict[str, Any]) -> List[str]:
+    return _extract_choice_values(((options.get("instrumentType") or {}).get("choices")))
+
+
+def _choices_region(options: Dict[str, Any], instrument_type: str) -> List[str]:
+    return _extract_choice_values(
+        ((((options.get("region") or {}).get("choices") or {}).get("instrumentType") or {}).get(instrument_type))
+    )
+
+
+def _choices_region_dependent(options: Dict[str, Any], key: str, instrument_type: str, region: str) -> List[str]:
+    root = (((options.get(key) or {}).get("choices") or {}).get("instrumentType") or {})
+    inst_node = root.get(instrument_type)
+    if not isinstance(inst_node, dict):
+        return []
+    by_region = inst_node.get("region")
+    if not isinstance(by_region, dict):
+        return []
+    region_node = by_region.get(region)
+    if region_node is None:
+        for k, v in by_region.items():
+            if str(k).strip().upper() == str(region).strip().upper():
+                region_node = v
+                break
+    return _extract_choice_values(region_node)
+
+
+def _interactive_settings_overrides(current: Dict[str, Any]) -> Dict[str, Any]:
+    overrides = dict(current)
+    options = _load_settings_options()
+    if not options:
+        print("未找到 metadata/settings_options.json，跳过交互选择。")
+        return overrides
+
+    inst_default = str(overrides.get("instrumentType") or "EQUITY").strip().upper()
+    inst_choices = _choices_instrument_type(options) or ["EQUITY"]
+    instrument_type = _pick_choice(inst_choices, inst_default, "选择 instrumentType")
+
+    region_default = str(overrides.get("region") or "USA").strip().upper()
+    region_choices = _choices_region(options, instrument_type)
+    if not region_choices:
+        region_choices = ["USA"]
+    region = _pick_choice(region_choices, region_default, "选择 region")
+
+    delay_default = str(overrides.get("delay") if overrides.get("delay") is not None else "1").strip()
+    delay_choices = _choices_region_dependent(options, "delay", instrument_type, region) or ["1"]
+    delay_text = _pick_choice(delay_choices, delay_default, "选择 delay")
+
+    universe_default = str(overrides.get("universe") or "TOP3000").strip().upper()
+    universe_choices = _choices_region_dependent(options, "universe", instrument_type, region) or ["TOP3000"]
+    universe = _pick_choice(universe_choices, universe_default, "选择 universe")
+
+    neutral_default = str(overrides.get("neutralization") or "INDUSTRY").strip().upper()
+    neutral_choices = _choices_region_dependent(options, "neutralization", instrument_type, region) or ["INDUSTRY"]
+    neutralization = _pick_choice(neutral_choices, neutral_default, "选择 neutralization")
+
+    overrides["instrumentType"] = instrument_type
+    overrides["region"] = region
+    overrides["universe"] = universe
+    overrides["neutralization"] = neutralization
+    try:
+        overrides["delay"] = int(delay_text)
+    except ValueError:
+        overrides["delay"] = delay_text
+
+    print(
+        "settings override => "
+        f"instrumentType={overrides['instrumentType']} "
+        f"region={overrides['region']} "
+        f"delay={overrides['delay']} "
+        f"universe={overrides['universe']} "
+        f"neutralization={overrides['neutralization']}"
+    )
+    return overrides
 
 
 def _load_brain_config() -> Dict[str, object]:
