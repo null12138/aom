@@ -207,7 +207,10 @@ def submit_run(args: argparse.Namespace) -> int:
             if not source_file:
                 print("--file is required for ordered mode")
                 return 1
-            start_index = args.start if args.start >= 0 else None
+            if args.start >= 0:
+                start_index = args.start
+            else:
+                start_index = int(state.get("cursor", 0) or 0)
             state, processed = run_submitter_stream(
                 state=state,
                 adapter=adapter,

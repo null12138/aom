@@ -308,10 +308,14 @@ def run_submitter(state: Dict[str, Any], adapter: SubmissionAdapter, db_path: Op
 
 def run_submitter_stream(state: Dict[str, Any], adapter: SubmissionAdapter, source_file: Path, start_index: int = 0, db_path: Optional[Path] = None, max_items: Optional[int] = None, stop_event: Optional[threading.Event] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Tuple[Dict[str, Any], int]:
     processed = 0
+    try:
+        normalized_start = int(start_index or 0)
+    except (TypeError, ValueError):
+        normalized_start = 0
     lib_conn = lib_connect(db_path) if db_path else None
     if lib_conn: lib_init_db(lib_conn)
     try:
-        for idx, item in iter_factors(source_file, start_index=start_index):
+        for idx, item in iter_factors(source_file, start_index=normalized_start):
             if stop_event and stop_event.is_set(): break
             _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
             state["cursor"] = idx + 1
