@@ -367,7 +367,54 @@ def _normalize_expression(expr: str) -> str:
     # trim trailing separators produced by natural-language list formatting
     text = re.sub(r"[;；\s]+$", "", text)
     text = _replace_binary_aliases(text)
+    text = _apply_forced_named_optional_fixes(text)
     return text.strip()
+
+
+_FORCED_NAMED_OPTIONAL_ARG_POSITIONS: Dict[str, Dict[int, str]] = {
+    # Brain parser requires named attribute for the 3rd argument.
+    "kth_element": {2: "k"},
+}
+
+
+def _apply_forced_named_optional_fixes(expression: str) -> str:
+    text = str(expression or "")
+    if not text:
+        return text
+    # Apply from inner-most call to outer-most call to keep indexes stable.
+    for _ in range(3):
+        calls = _extract_function_calls(text)
+        changed_any = False
+        for call in sorted(calls, key=lambda node: _to_int(node.get("open_idx"), -1), reverse=True):
+            op_name = str(call.get("name_lower") or "").strip()
+            named_positions = _FORCED_NAMED_OPTIONAL_ARG_POSITIONS.get(op_name)
+            if not named_positions:
+                continue
+            args = list(call.get("args") or [])
+            changed = False
+            for pos, key in named_positions.items():
+                if pos >= len(args):
+                    continue
+                token = str(args[pos] or "").strip()
+                if not token:
+                    continue
+                is_named, _ = _parse_named_argument(token)
+                if is_named:
+                    continue
+                args[pos] = f"{key}={token}"
+                changed = True
+            if not changed:
+                continue
+            open_idx = _to_int(call.get("open_idx"), -1)
+            close_idx = _to_int(call.get("close_idx"), -1)
+            if open_idx < 0 or close_idx <= open_idx:
+                continue
+            inner = ", ".join(str(arg) for arg in args)
+            text = text[:open_idx + 1] + inner + text[close_idx:]
+            changed_any = True
+        if not changed_any:
+            break
+    return text
 
 
 def _contains_field_token(expression: str, field_id: str) -> bool:
@@ -727,6 +774,20 @@ def _validate_expression_locally(
             errors.append(
                 f"{op_name}: optional args must use named form key=value (positional optional found)"
             )
+
+        forced_named_positions = _FORCED_NAMED_OPTIONAL_ARG_POSITIONS.get(op_name)
+        if forced_named_positions:
+            for pos, key in forced_named_positions.items():
+                if pos >= len(args):
+                    continue
+                token = str(args[pos] or "").strip()
+                if not token:
+                    continue
+                is_named, parsed_key = _parse_named_argument(token)
+                if not is_named:
+                    errors.append(f"{op_name}: argument#{pos + 1} must use named form '{key}=...'")
+                elif parsed_key != key:
+                    errors.append(f"{op_name}: argument#{pos + 1} must be '{key}=...'")
 
     operator_calls = _count_operator_calls(expr)
     if operator_calls > max_operator_calls:
