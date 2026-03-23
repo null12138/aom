@@ -47,6 +47,7 @@ class BrainClient:
         api_base: str = DEFAULT_API_BASE,
         timeout: int = 30,
         use_proxy: bool = False,
+        poll_timeout: Optional[Any] = None,
     ):
         self.username = username
         self.password = password
@@ -56,7 +57,22 @@ class BrainClient:
         # Default: do not read HTTP(S)_PROXY/ALL_PROXY from environment.
         self.session.trust_env = self.use_proxy
         self.timeout = timeout
+        self.poll_timeout = self._normalize_poll_timeout(poll_timeout)
         self._login_lock = threading.Lock()
+
+    def _normalize_poll_timeout(self, raw_timeout: Optional[Any]) -> Any:
+        if raw_timeout is None:
+            # Polling endpoints can be slow; use longer read timeout than generic API calls.
+            return (10, max(60, int(self.timeout) * 3))
+        if isinstance(raw_timeout, (tuple, list)) and len(raw_timeout) >= 2:
+            connect_timeout = max(3, int(raw_timeout[0]))
+            read_timeout = max(10, int(raw_timeout[1]))
+            return (connect_timeout, read_timeout)
+        try:
+            read_timeout = max(10, int(raw_timeout))
+        except (TypeError, ValueError):
+            read_timeout = max(60, int(self.timeout) * 3)
+        return (10, read_timeout)
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         if "timeout" not in kwargs:
@@ -111,6 +127,8 @@ class BrainClient:
         if on_heartbeat: on_heartbeat(0)
         
         retry_count = 0
+        network_error_streak = 0
+        last_network_warn_ts = 0.0
         while True:
             if stop_event and stop_event.is_set():
                 raise BrainApiError("任务已被用户手动中断")
@@ -133,7 +151,7 @@ class BrainClient:
                 raise BrainApiError(f"仿真超时 ({max_wait}s) | {extra}")
 
             try:
-                resp = self._request("GET", url)
+                resp = self._request("GET", url, timeout=self.poll_timeout)
                 if resp.status_code == 429: # Rate limit
                     wait_time = int(resp.headers.get("Retry-After", 10))
                     time.sleep(wait_time)
@@ -147,6 +165,7 @@ class BrainClient:
 
                 data = resp.json()
                 status = data.get("status")
+                network_error_streak = 0
                 
                 if status == "COMPLETE": return data
                 if status in ("ERROR", "CANCELLED", "CANCELED"):
@@ -158,8 +177,35 @@ class BrainClient:
                     on_heartbeat(elapsed)
 
             except requests.RequestException as e:
-                logger.warning(f"Network error during polling: {e}")
-                time.sleep(5)
+                network_error_streak += 1
+                wait_sec = min(30, 2 ** min(network_error_streak, 5))
+                now_ts = time.time()
+                should_warn = (
+                    network_error_streak in {1, 3, 5, 8}
+                    or (now_ts - last_network_warn_ts) >= 60
+                )
+                if should_warn:
+                    last_network_warn_ts = now_ts
+                    logger.warning(
+                        "Network error during polling (simulation_id=%s, streak=%d, backoff=%ss): %s",
+                        simulation_id or "-",
+                        network_error_streak,
+                        wait_sec,
+                        e,
+                    )
+                else:
+                    logger.info(
+                        "Polling retry (simulation_id=%s, streak=%d, backoff=%ss)",
+                        simulation_id or "-",
+                        network_error_streak,
+                        wait_sec,
+                    )
+                if on_heartbeat:
+                    on_heartbeat(elapsed)
+                for _ in range(wait_sec):
+                    if stop_event and stop_event.is_set():
+                        break
+                    time.sleep(1)
                 continue
 
             # 动态调整休眠时间：初期快，后期慢
