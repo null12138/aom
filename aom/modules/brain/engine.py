@@ -195,7 +195,30 @@ class AlphaGenerator:
             raise RuntimeError(f"AI response parsing failed: {e}")
 
     def _build_prompt(self, fields: List[Dict[str, Any]], report_text: Optional[str], patterns: Optional[List[Dict[str, Any]]], context: Optional[Dict[str, Any]], operators: Optional[List[Dict[str, Any]]], count: int) -> str:
-        fields_str = "\n".join([f"- {f['id']}: {f.get('description', '')} (Type: {f.get('type', '')})" for f in fields])
+        def _shorten(text: Any, limit: int = 180) -> str:
+            raw = str(text or "").strip()
+            if not raw:
+                return ""
+            compact = " ".join(raw.split())
+            return compact if len(compact) <= limit else (compact[: limit - 3] + "...")
+
+        field_lines: List[str] = []
+        for idx, f in enumerate(fields or []):
+            if not isinstance(f, dict):
+                continue
+            fid = str(f.get("id") or "").strip()
+            if not fid:
+                continue
+            ftype = str(f.get("type") or "").strip() or "-"
+            dataset_id = str(f.get("dataset_id") or f.get("datasetId") or "").strip()
+            dataset_name = str(f.get("dataset_name") or f.get("datasetName") or "").strip()
+            dataset = dataset_id or dataset_name or "-"
+            desc = _shorten(f.get("description") or f.get("desc") or "", limit=220)
+            line = f"- [{idx + 1}] id={fid} | type={ftype} | dataset={dataset}"
+            if desc:
+                line += f" | desc={desc}"
+            field_lines.append(line)
+        fields_str = "\n".join(field_lines)
         single_dataset_only = bool(context.get("single_dataset_only")) if isinstance(context, dict) else False
         mutation_mode = str(context.get("mutation_mode") or "").lower() if isinstance(context, dict) else ""
         max_operator_calls = int(context.get("max_operator_calls", 8)) if isinstance(context, dict) else 8
@@ -263,8 +286,18 @@ STRICT REQUIREMENTS (hard constraints):
 7. Operator Budget: each expression must use at most {max_operator_calls} operator calls.
 8. Avoid placeholders or pseudo variables (e.g., x, y, alpha, beta, same_dataset, d).
 9. Avoid near-duplicates: candidates must not be simple sign flips or tiny parameter edits of each other.
-10. Use stable naming: "name" should be concise and unique; "logic" should explain edge in <= 30 words.
-11. Output exactly {count} items in "alphas".
+10. Use field metadata: leverage each field's desc/type/dataset hints to pick valid transforms and avoid misuse.
+11. Use stable naming: "name" should be concise and unique; "logic" should explain edge in <= 30 words.
+12. Pre-output syntax self-check is mandatory (silent, do not print checklist):
+   - parentheses are balanced
+   - every operator call respects signature arity
+   - optional args use named form when required (e.g., k=..., lag=..., rettype=...)
+   - no unknown operator/function token
+   - no unknown field id
+   - expression remains parseable after removing spaces
+13. If any candidate fails self-check, repair/regenerate before final JSON output.
+14. Never output explanations of checks; output only final JSON alphas.
+15. Output exactly {count} items in "alphas".
 {extra_rules_str}
 
 OUTPUT CONTRACT:
