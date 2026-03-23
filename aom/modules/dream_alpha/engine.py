@@ -618,55 +618,39 @@ DEFAULT_GENERATION_COUNT = 8
 FREQUENT_OP_LIMIT = 2
 DEFAULT_NOTIFY_URL = "https://tgpusher.opener.eu.org/"
 
+FORUM_TEMPLATE_SEED_EXPRESSIONS: List[str] = [
+    "rank(close)",
+    "rank(volume)",
+    "ts_zscore(returns, 10)",
+    "ts_zscore(volume, 20)",
+    "ts_rank(close, 10)",
+    "ts_rank(volume, 20)",
+    "rank(ts_delta(close, 5))",
+    "rank(ts_mean(returns, 5))",
+    "rank(ts_stddev(returns, 20))",
+    "rank(ts_decay_linear(returns, 10))",
+    "rank(ts_corr(close, volume, 20))",
+    "rank(ts_covariance(close, volume, 20))",
+    "-days_from_last_change(rp_ess_insider)",
+    "ts_mean(ts_rank(divide(sedol, ts_mean(sedol, 20)), 10), 60)",
+    "-ts_mean(ts_rank(sedol, 20), 60)",
+    "rank(-ts_backfill(zscore(goodwill/sales), 65) * (rank(fn_accrued_liab_a) + rank(capex) + rank(dividend / sharesout) + rank(debt_st)))",
+    "-(scale(quantile(zscore(days_from_last_change(rp_css_credit)), driver=gaussian, sigma=1.0)))",
+    "-(ts_count_nans(actual_eps_value_quarterly,20))",
+    "trade_when(less(0.85, rank(news_mov_vol)), -zscore(ts_sum(news_max_up_ret,10)), ts_delay(-zscore(ts_sum(news_max_up_ret,10)),1))",
+    "-(days_from_last_change(rp_css_insider))",
+    "-inverse(max(cash_st,1))",
+    "-winsorize(days_from_last_change(rp_ess_price), std=4)",
+]
+
 FORUM_TEMPLATE_SEED_ITEMS: List[Dict[str, str]] = [
     {
-        "name": "forum_short_reversal_industry_neutral",
-        "logic": "Forum-style short-term reversal with industry neutralization.",
-        "expression": "group_neutralize(-ts_returns(close,5),industry)",
-        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
-    },
-    {
-        "name": "forum_vol_regime_vwap_signal",
-        "logic": "Forum-style volatility regime filter then vwap-relative signal.",
-        "expression": "trade_when(ts_rank(ts_std_dev(returns,20),250)>0.5,rank(-close/vwap),-1)",
-        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
-    },
-    {
-        "name": "forum_volume_gate_vwap",
-        "logic": "Forum-style liquidity gate plus vwap-relative value.",
-        "expression": "trade_when(rank(volume)>0.3,rank(-close/vwap)*(1+ts_rank(sales,63)),-1)",
-        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/best-tp-alpha",
-    },
-    {
-        "name": "forum_event_delay_decay",
-        "logic": "Forum-style event pulse with hold/decay overlay.",
-        "expression": "ts_decay_exp_window(trade_when(days_from_last_change(rp_css_mna)>4,group_rank(signed_power(rank(ts_delta(close,2)),2.5),industry),-1),30,factor=0.99)",
-        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/volume-returns-abhas",
-    },
-    {
-        "name": "forum_sentiment_volume_regression",
-        "logic": "Forum-style returns regressed on sentiment-volume component under risk gate.",
-        "expression": "trade_when(abs(returns)<0.08,group_neutralize(-ts_regression(returns,vector_neut(volume,ts_backfill(snt_buzz_ret,10)),252),bucket(rank(cap),range=\"0.1,1,0.1\")),-1)",
-        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/volume-returns-abhas",
-    },
-    {
-        "name": "forum_fundamental_backfill_rank",
-        "logic": "Forum-style fundamental backfill then industry ranking.",
-        "expression": "group_rank(zscore(ts_backfill(actual_eps_value_quarterly,90)),industry)",
-        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
-    },
-    {
-        "name": "forum_fundamental_delta_rank",
-        "logic": "Forum-style low-frequency fundamental delta ranked by industry.",
-        "expression": "group_rank(ts_delta(ts_backfill(revenue,90),20),industry)",
-        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
-    },
-    {
-        "name": "forum_ma_spread_trigger_vwap",
-        "logic": "Forum-style MA-spread trigger with industry-neutral vwap relative signal.",
-        "expression": "trade_when(ts_delta(ts_mean(close,10)-ts_mean(close,30),1)>0,group_neutralize(-close/vwap,industry),-1)",
-        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/usa-pcy-rupam",
-    },
+        "name": f"forum_seed_{idx:02d}",
+        "logic": "User-provided seed template.",
+        "expression": expr,
+        "source": "forum_seed_user_replace_2026-03-23",
+    }
+    for idx, expr in enumerate(FORUM_TEMPLATE_SEED_EXPRESSIONS, start=1)
 ]
 
 SIMPLE_PREFERRED_OPERATORS: Set[str] = {
