@@ -678,7 +678,10 @@ const renderDreamStatus = (payload) => {
   const errors = Number(stats.errors || 0);
   const pgSaved = Number(stats.pg_seed_saved || 0);
   const pgErrors = Number(stats.pg_seed_errors || 0);
-  const statusText = stopping ? '停止中' : (running ? '运行中' : '已停止');
+  const threadAlive = !!data.thread_alive;
+  const statusText = stopping
+    ? (threadAlive ? '停止中' : '已停止')
+    : (running ? '运行中' : '已停止');
   const lastError = data.last_error ? String(data.last_error).replace(/\s+/g, ' ').slice(0, 120) : '';
   const optimizer = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : {};
   const stage = optimizer.stage ? String(optimizer.stage) : '-';
@@ -2053,7 +2056,7 @@ const actions = {
     return data;
   },
   async dreamStop() {
-    const data = await apiPost('/api/dream-alpha/stop', {});
+    const data = await apiPost('/api/dream-alpha/stop', { wait_timeout_sec: 120 });
     renderDreamStatus(data);
     stopDreamStatusPolling();
     return data;

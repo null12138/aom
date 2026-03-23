@@ -674,11 +674,11 @@ class AOMHandler(BaseHTTPRequestHandler):
             return DREAM_ALPHA_DAEMON.start(cfg)
 
         if path == "/api/dream-alpha/stop":
-            raw_wait = payload.get("wait_timeout_sec", 5)
+            raw_wait = payload.get("wait_timeout_sec", 120)
             try:
                 wait_timeout_sec = int(raw_wait)
             except (TypeError, ValueError):
-                wait_timeout_sec = 5
+                wait_timeout_sec = 120
             return DREAM_ALPHA_DAEMON.stop(wait_timeout_sec=wait_timeout_sec)
 
         if path == "/api/dream-alpha/status":
