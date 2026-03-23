@@ -3,7 +3,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 from .knowledge import OPERATORS_REFERENCE
 
@@ -16,7 +16,7 @@ class AlphaGenerator:
         self.gemini_key = config.get("gemini_api_key")
         self.openai_key = config.get("openai_api_key")
         self.openai_base = config.get("openai_api_base", "https://api.openai.com/v1")
-        self.openai_model = config.get("openai_model", "gpt-4-turbo")
+        self.openai_model = config.get("openai_model", "gpt-5.4")
         self.llm_request_timeout = self._safe_float(config.get("llm_request_timeout", 180), 180.0)
         self.llm_max_retries = max(1, self._safe_int(config.get("llm_max_retries", 3), 3))
         self.llm_retry_backoff = max(0.1, self._safe_float(config.get("llm_retry_backoff", 1.5), 1.5))
@@ -217,6 +217,46 @@ class AlphaGenerator:
             return default
         return bool(value)
 
+    def _infer_economic_theme_hints(self, fields: List[Dict[str, Any]], top_k: int = 5) -> List[str]:
+        theme_keywords: List[Tuple[str, Tuple[str, ...]]] = [
+            ("Value / Mispricing", ("value", "valuation", "pe", "pb", "ps", "ev", "ebitda", "book", "yield", "fcf")),
+            ("Quality / Profitability", ("quality", "profit", "margin", "roe", "roa", "accrual", "leverage", "debt", "cashflow")),
+            ("Growth / Revisions", ("growth", "delta", "change", "chg", "revision", "estimate", "surprise", "guidance")),
+            ("Investment / Balance-Sheet", ("asset", "inventory", "capex", "ppe", "working_capital", "investment")),
+            ("Momentum / Trend", ("momentum", "return", "close", "open", "high", "low", "vwap", "price")),
+            ("Reversal / Mean-Reversion", ("reversal", "mean", "zscore", "gap", "overnight", "contrarian")),
+            ("Volatility / Risk", ("vol", "volatility", "beta", "variance", "std", "drawdown", "ivol")),
+            ("Liquidity / Trading Friction", ("volume", "turnover", "spread", "illiquidity", "amihud", "adv", "dollarvol", "tvr")),
+            ("Analyst / Expectations", ("analyst", "estimate", "target", "recommend", "rating", "surprise")),
+            ("Sentiment / Attention", ("sentiment", "news", "social", "attention", "search", "esg")),
+        ]
+        per_theme: List[Tuple[int, str, List[str]]] = []
+        for theme_name, keywords in theme_keywords:
+            matched_ids: List[str] = []
+            for item in fields or []:
+                if not isinstance(item, dict):
+                    continue
+                fid = str(item.get("id") or "").strip()
+                if not fid:
+                    continue
+                desc = str(item.get("description") or item.get("desc") or "")
+                dataset_id = str(item.get("dataset_id") or item.get("datasetId") or "")
+                dataset_name = str(item.get("dataset_name") or item.get("datasetName") or "")
+                haystack = " ".join([fid, desc, dataset_id, dataset_name]).lower()
+                if any(keyword in haystack for keyword in keywords):
+                    matched_ids.append(fid)
+            if matched_ids:
+                uniq = list(dict.fromkeys(matched_ids))
+                per_theme.append((len(uniq), theme_name, uniq[:3]))
+        per_theme.sort(key=lambda row: row[0], reverse=True)
+
+        hints: List[str] = []
+        for count, theme_name, examples in per_theme[: max(1, top_k)]:
+            hints.append(
+                f"- {theme_name}: matched_fields={count}, examples={', '.join(examples)}"
+            )
+        return hints
+
     def _parse_json_response(self, text: str) -> List[Dict[str, Any]]:
         try:
             # 清理 Markdown 块
@@ -296,12 +336,15 @@ class AlphaGenerator:
         return f"""You are fixing one WorldQuant Brain FastExpr expression.
 
 Task:
-- Repair the expression so it is valid FastExpr and keeps original financial intent.
+- Repair the expression so it is valid FastExpr and keeps original economic intent.
+- Keep the alpha thesis direction unchanged (do not rewrite into a different signal family unless absolutely required by errors).
+- Prefer minimal, targeted edits over full rewrites.
 - Keep operator calls <= 8.
 - Keep referenced fields <= 8.
 - Use ONLY provided fields.
 - Do not output assignment statements (`a = ...;`), only one final formula.
 - Prefer simple robust operators (rank/zscore/winsorize/ts_rank/ts_delta/ts_mean/ts_std_dev/group_rank/group_neutralize).
+- Avoid anti-patterns: self-division clones, meaningless constant chains, deep brittle nesting.
 
 Context: region={region}, universe={universe}, delay={delay}
 
@@ -353,7 +396,15 @@ Return JSON only:
         prefer_simple_operators = bool(context.get("prefer_simple_operators")) if isinstance(context, dict) else False
         stage = str(context.get("stage") or "").strip().upper() if isinstance(context, dict) else ""
         reference_expression = str(context.get("reference_expression") or "").strip() if isinstance(context, dict) else ""
-        
+        economic_hints = self._infer_economic_theme_hints(fields)
+        if economic_hints:
+            economics_hint_str = "Detected Economic Signal Spaces (prioritize these):\n" + "\n".join(economic_hints)
+        else:
+            economics_hint_str = (
+                "Detected Economic Signal Spaces (prioritize these):\n"
+                "- Ambiguous from field names; enforce explicit economic story in logic."
+            )
+
         if operators:
             ops_str = "Available FastExpr Operators (Dynamic from API):\n"
             # Keep enough operators/signatures for arity guidance while controlling prompt size.
@@ -377,20 +428,20 @@ Return JSON only:
 
         extra_rules = []
         if mutation_mode == "max":
-            extra_rules.append("12. Mutation Mode MAX: enforce large operator-tree differences between candidates.")
+            extra_rules.append("- Mutation Mode MAX: enforce large operator-tree differences between candidates.")
         if mutation_mode == "balanced":
-            extra_rules.append("12. Mutation Mode BALANCED: prioritize usable variants over aggressive structural novelty.")
+            extra_rules.append("- Mutation Mode BALANCED: prioritize usable variants over aggressive structural novelty.")
         if single_dataset_only:
-            extra_rules.append("13. Single Dataset ONLY: every expression must stay within one dataset family.")
+            extra_rules.append("- Single Dataset ONLY: every expression must stay within one dataset family.")
         if prefer_simple_operators:
             extra_rules.append(
-                "14. Prefer simple operators: rank/zscore/winsorize/ts_rank/ts_delta/ts_mean/ts_std_dev/ts_zscore/ts_backfill/group_rank/group_zscore/group_neutralize/trade_when."
+                "- Prefer simple operators: rank/zscore/winsorize/ts_rank/ts_delta/ts_mean/ts_std_dev/ts_zscore/ts_backfill/group_rank/group_zscore/group_neutralize/trade_when."
             )
             extra_rules.append(
-                "15. Avoid heavy operators unless necessary: regression/vector families and high-order correlation/kurtosis operators."
+                "- Avoid heavy operators unless necessary: regression/vector families and high-order correlation/kurtosis operators."
             )
             extra_rules.append(
-                "16. Keep nesting shallow and avoid weak structures like field/group_sum(field,group) or pure self-normalization clones."
+                "- Keep nesting shallow and avoid weak structures like field/group_sum(field,group) or pure self-normalization clones."
             )
         extra_rules_str = "\n".join(extra_rules)
         stage_str = f"- Stage: {stage}\n" if stage else ""
@@ -406,6 +457,7 @@ Generate {count} mutually diverse, simulation-ready alphas.
 
 {report_str}
 {patterns_str}
+{economics_hint_str}
 
 Available Data Fields:
 {fields_str}
@@ -421,6 +473,15 @@ F. Financial thinking checklist before output:
    - Mechanism: why this field and transform should predict future returns.
    - Risk: avoid pure size/beta/industry leak unless intentionally controlled.
    - Robustness: prefer interpretable, stable transforms over brittle overfitting.
+G. Economics-first mapping (mandatory, think silently):
+   - Choose one primary theme per alpha: Value / Quality / Growth-Revisions / Investment / Momentum / Reversal / Volatility / Liquidity / Sentiment.
+   - Convert that thesis into an implementable signal path (transform -> normalize -> optional neutralize/risk control).
+   - Prefer monotonic transforms with clear sign intuition.
+   - Define implied holding horizon by window choices (short/medium/long) and keep it consistent with thesis.
+H. Reject low-quality ideas (mandatory):
+   - Pure syntactic novelty without economic mechanism.
+   - Circular constructions and self-referential normalization clones.
+   - Signals dominated by one unstable point estimate without denoising/risk control.
 
 STRICT REQUIREMENTS (hard constraints):
 1. Syntax: MUST use WorldQuant Brain FastExpr syntax (e.g., ts_rank, ts_delta, ts_av, group_rank).
@@ -435,17 +496,24 @@ STRICT REQUIREMENTS (hard constraints):
 8b. Expression must be a single FastExpr formula; do not output assignment statements like `a = ...;`.
 9. Avoid near-duplicates: candidates must not be simple sign flips or tiny parameter edits of each other.
 10. Use field metadata: leverage each field's desc/type/dataset hints to pick valid transforms and avoid misuse.
-11. Use stable naming: "name" should be concise and unique; "logic" should explain edge in <= 30 words.
-12. Pre-output syntax self-check is mandatory (silent, do not print checklist):
+11. Use stable naming: "name" should be concise and unique.
+11b. "logic" must follow this compact format (<= 45 words):
+    "Thesis: ...; Mechanism: ...; RiskCtrl: ...".
+12. Portfolio realism:
+   - Prefer expressions that are robust under industry/common-risk neutralization.
+   - Avoid using only one noisy raw field without ranking/zscoring/winsorization/backfill.
+13. Ensure economic diversity across batch: cover at least 3 distinct economic themes when count >= 5.
+14. Prefer parsimonious trees: target 3~6 operators unless thesis requires otherwise.
+15. Pre-output syntax self-check is mandatory (silent, do not print checklist):
    - parentheses are balanced
    - every operator call respects signature arity
    - optional args use named form when required (e.g., k=..., lag=..., rettype=...)
    - no unknown operator/function token
    - no unknown field id
    - expression remains parseable after removing spaces
-13. If any candidate fails self-check, repair/regenerate before final JSON output.
-14. Never output explanations of checks; output only final JSON alphas.
-15. Output exactly {count} items in "alphas".
+16. If any candidate fails self-check, repair/regenerate before final JSON output.
+17. Never output explanations of checks; output only final JSON alphas.
+18. Output exactly {count} items in "alphas".
 {extra_rules_str}
 
 OUTPUT CONTRACT:
@@ -458,7 +526,7 @@ Example output:
     {{
       "name": "Intraday Momentum Filter",
       "expression": "ts_rank(returns, 10) * group_rank(open, industry)",
-      "logic": "Combines cross-sectional momentum with industry relative value."
+      "logic": "Thesis: momentum persists; Mechanism: trend ranked within peers; RiskCtrl: industry neutralization reduces sector beta."
     }}
   ]
 }}

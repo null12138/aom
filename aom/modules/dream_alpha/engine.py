@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
@@ -54,6 +55,16 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return bool(value)
+
+
+def _is_user_seed_source(source: str) -> bool:
+    tag = str(source or "").strip().lower()
+    return tag in {
+        "user_bootstrap",
+        "factor_library_seed",
+        "dream_alpha_learning",
+        "dream_alpha_loop",
+    }
 
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
@@ -603,9 +614,60 @@ OPERATOR_THEME_INDEX: Dict[str, str] = {
 }
 
 THEME_QUOTA_MIN = 4
-DEFAULT_GENERATION_COUNT = 5
+DEFAULT_GENERATION_COUNT = 8
 FREQUENT_OP_LIMIT = 2
 DEFAULT_NOTIFY_URL = "https://tgpusher.opener.eu.org/"
+
+FORUM_TEMPLATE_SEED_ITEMS: List[Dict[str, str]] = [
+    {
+        "name": "forum_short_reversal_industry_neutral",
+        "logic": "Forum-style short-term reversal with industry neutralization.",
+        "expression": "group_neutralize(-ts_returns(close,5),industry)",
+        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
+    },
+    {
+        "name": "forum_vol_regime_vwap_signal",
+        "logic": "Forum-style volatility regime filter then vwap-relative signal.",
+        "expression": "trade_when(ts_rank(ts_std_dev(returns,20),250)>0.5,rank(-close/vwap),-1)",
+        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
+    },
+    {
+        "name": "forum_volume_gate_vwap",
+        "logic": "Forum-style liquidity gate plus vwap-relative value.",
+        "expression": "trade_when(rank(volume)>0.3,rank(-close/vwap)*(1+ts_rank(sales,63)),-1)",
+        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/best-tp-alpha",
+    },
+    {
+        "name": "forum_event_delay_decay",
+        "logic": "Forum-style event pulse with hold/decay overlay.",
+        "expression": "ts_decay_exp_window(trade_when(days_from_last_change(rp_css_mna)>4,group_rank(signed_power(rank(ts_delta(close,2)),2.5),industry),-1),30,factor=0.99)",
+        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/volume-returns-abhas",
+    },
+    {
+        "name": "forum_sentiment_volume_regression",
+        "logic": "Forum-style returns regressed on sentiment-volume component under risk gate.",
+        "expression": "trade_when(abs(returns)<0.08,group_neutralize(-ts_regression(returns,vector_neut(volume,ts_backfill(snt_buzz_ret,10)),252),bucket(rank(cap),range=\"0.1,1,0.1\")),-1)",
+        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/volume-returns-abhas",
+    },
+    {
+        "name": "forum_fundamental_backfill_rank",
+        "logic": "Forum-style fundamental backfill then industry ranking.",
+        "expression": "group_rank(zscore(ts_backfill(actual_eps_value_quarterly,90)),industry)",
+        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
+    },
+    {
+        "name": "forum_fundamental_delta_rank",
+        "logic": "Forum-style low-frequency fundamental delta ranked by industry.",
+        "expression": "group_rank(ts_delta(ts_backfill(revenue,90),20),industry)",
+        "source": "https://r.jina.ai/http://blog.csdn.net/m0_73177400/article/details/148048162",
+    },
+    {
+        "name": "forum_ma_spread_trigger_vwap",
+        "logic": "Forum-style MA-spread trigger with industry-neutral vwap relative signal.",
+        "expression": "trade_when(ts_delta(ts_mean(close,10)-ts_mean(close,30),1)>0,group_neutralize(-close/vwap,industry),-1)",
+        "source": "https://github-wiki-see.page/m/kitzz03/WorldQuant-Alphas/wiki/usa-pcy-rupam",
+    },
+]
 
 SIMPLE_PREFERRED_OPERATORS: Set[str] = {
     "rank",
@@ -1308,7 +1370,7 @@ class DreamAlphaDaemon:
         return Path(self._cfg.get("cursor_file", "runs/dream_alpha_cursor.json"))
 
     def _seed_file(self) -> Path:
-        return Path(self._cfg.get("seed_file", "runs/dream_alpha_seed_library.json"))
+        return Path(self._cfg.get("seed_file", "generated/dream_alpha_seed_library.json"))
 
     def _high_template_file(self) -> Path:
         return Path(self._cfg.get("high_template_file", "runs/dream_alpha_high_templates.jsonl"))
@@ -1535,10 +1597,10 @@ class DreamAlphaDaemon:
         out["generation_attempts"] = max(1, min(6, _to_int(out.get("generation_attempts"), 3)))
         out["mutation_multiplier"] = max(1, min(8, _to_int(out.get("mutation_multiplier"), 3)))
         out["simulation_concurrency"] = max(1, min(32, _to_int(out.get("simulation_concurrency"), 5)))
-        out["max_operator_calls"] = max(1, min(8, _to_int(out.get("max_operator_calls"), 8)))
-        out["max_expression_fields"] = max(1, min(8, _to_int(out.get("max_expression_fields"), 8)))
+        out["max_operator_calls"] = max(1, min(24, _to_int(out.get("max_operator_calls"), 12)))
+        out["max_expression_fields"] = max(1, min(24, _to_int(out.get("max_expression_fields"), 12)))
         out["enable_llm_repair"] = _to_bool(out.get("enable_llm_repair"), True)
-        out["repair_attempts"] = max(0, min(2, _to_int(out.get("repair_attempts"), 1)))
+        out["repair_attempts"] = max(0, min(2, _to_int(out.get("repair_attempts"), 2)))
         out["mutation_keep_ratio"] = max(0.1, min(0.9, _to_float(out.get("mutation_keep_ratio"), 0.4)))
         out["error_notify_cooldown_sec"] = max(0, _to_int(out.get("error_notify_cooldown_sec"), 180))
         out["no_success_notify_every"] = max(1, _to_int(out.get("no_success_notify_every"), 2))
@@ -1547,11 +1609,22 @@ class DreamAlphaDaemon:
         out["sharpe_abs_threshold"] = _to_float(out.get("sharpe_abs_threshold"), 1.0)
         out["fitness_threshold"] = _to_float(out.get("fitness_threshold"), 1.0)
         out["template_sharpe_threshold"] = _to_float(out.get("template_sharpe_threshold"), 1.58)
-        out["prefer_simple_operators"] = _to_bool(out.get("prefer_simple_operators"), True)
+        out["prefer_simple_operators"] = _to_bool(out.get("prefer_simple_operators"), False)
+        out["enable_negative_flip"] = _to_bool(out.get("enable_negative_flip"), True)
+        out["negative_flip_sharpe_threshold"] = _to_float(out.get("negative_flip_sharpe_threshold"), -0.80)
+        out["negative_flip_fitness_threshold"] = _to_float(out.get("negative_flip_fitness_threshold"), -0.15)
+        out["negative_flip_force_count"] = max(0, min(4, _to_int(out.get("negative_flip_force_count"), 2)))
+        out["negative_flip_max_seeds"] = max(1, min(16, _to_int(out.get("negative_flip_max_seeds"), 8)))
         out["learning_seed_sharpe_min"] = _to_float(out.get("learning_seed_sharpe_min"), 0.20)
-        out["learning_seed_fitness_min"] = _to_float(out.get("learning_seed_fitness_min"), 0.05)
+        out["learning_seed_fitness_min"] = _to_float(out.get("learning_seed_fitness_min"), 1.0)
         out["include_patterns"] = _to_bool(out.get("include_patterns"), True)
-        out["single_dataset_only"] = _to_bool(out.get("single_dataset_only"), True)
+        out["single_dataset_only"] = _to_bool(out.get("single_dataset_only"), False)
+        out["inject_forum_seed_templates"] = _to_bool(out.get("inject_forum_seed_templates"), True)
+        out["seed_from_library_db"] = _to_bool(out.get("seed_from_library_db"), True)
+        out["library_db_file"] = str(out.get("library_db_file") or "db/factor_library.db")
+        out["library_seed_limit"] = max(0, min(500, _to_int(out.get("library_seed_limit"), 80)))
+        out["library_seed_min_abs_sharpe"] = _to_float(out.get("library_seed_min_abs_sharpe"), 0.0)
+        out["library_seed_min_fitness"] = _to_float(out.get("library_seed_min_fitness"), 1.0)
         out["seed_expressions"] = self._normalize_seed_exprs(out.get("seed_expressions"))
         out["fields"] = self._normalize_fields(out.get("fields"))
         out["context"] = out.get("context") if isinstance(out.get("context"), dict) else {}
@@ -1570,7 +1643,7 @@ class DreamAlphaDaemon:
         out["pg_seed_max_turnover"] = _to_float(out.get("pg_seed_max_turnover"), 200.0)
         out["pg_seed_timeout_sec"] = max(1, _to_int(out.get("pg_seed_timeout_sec"), 10))
         out["cursor_file"] = str(out.get("cursor_file") or "runs/dream_alpha_cursor.json")
-        out["seed_file"] = str(out.get("seed_file") or "runs/dream_alpha_seed_library.json")
+        out["seed_file"] = str(out.get("seed_file") or "generated/dream_alpha_seed_library.json")
         out["high_template_file"] = str(out.get("high_template_file") or "runs/dream_alpha_high_templates.jsonl")
         out["field_meta_cache_file"] = str(out.get("field_meta_cache_file") or "metadata/field_meta_cache.json")
         use_proxy_raw = out.get("use_proxy")
@@ -1632,6 +1705,11 @@ class DreamAlphaDaemon:
             "fitness_threshold": cfg["fitness_threshold"],
             "template_sharpe_threshold": cfg["template_sharpe_threshold"],
             "prefer_simple_operators": cfg["prefer_simple_operators"],
+            "enable_negative_flip": cfg["enable_negative_flip"],
+            "negative_flip_sharpe_threshold": cfg["negative_flip_sharpe_threshold"],
+            "negative_flip_fitness_threshold": cfg["negative_flip_fitness_threshold"],
+            "negative_flip_force_count": cfg["negative_flip_force_count"],
+            "negative_flip_max_seeds": cfg["negative_flip_max_seeds"],
             "include_patterns": cfg["include_patterns"],
             "max_seed_in_prompt": cfg["max_seed_in_prompt"],
             "auth_refresh_interval_sec": cfg["auth_refresh_interval_sec"],
@@ -1648,6 +1726,12 @@ class DreamAlphaDaemon:
             "no_success_notify_every": cfg["no_success_notify_every"],
             "no_success_notify_cooldown_sec": cfg["no_success_notify_cooldown_sec"],
             "single_dataset_only": cfg["single_dataset_only"],
+            "inject_forum_seed_templates": cfg["inject_forum_seed_templates"],
+            "seed_from_library_db": cfg["seed_from_library_db"],
+            "library_db_file": cfg["library_db_file"],
+            "library_seed_limit": cfg["library_seed_limit"],
+            "library_seed_min_abs_sharpe": cfg["library_seed_min_abs_sharpe"],
+            "library_seed_min_fitness": cfg["library_seed_min_fitness"],
             "baseline_alpha_id": cfg["baseline_alpha_id"],
             "operators_file": cfg["operators_file"],
             "results_file": str(self._results_file()),
@@ -1820,6 +1904,10 @@ class DreamAlphaDaemon:
                 expr = _normalize_expression(str(item.get("expression") or ""))
                 if not expr or expr in seen:
                     continue
+                source = str(item.get("source") or "seed_file")
+                fitness = _to_float(item.get("fitness"), 0.0)
+                if _is_user_seed_source(source) and not (fitness > 1.0):
+                    continue
                 seen.add(expr)
                 normalized["items"].append(
                     {
@@ -1827,9 +1915,9 @@ class DreamAlphaDaemon:
                         "name": str(item.get("name") or ""),
                         "logic": str(item.get("logic") or ""),
                         "sharpe": _to_float(item.get("sharpe"), 0.0),
-                        "fitness": _to_float(item.get("fitness"), 0.0),
+                        "fitness": fitness,
                         "created_at": str(item.get("created_at") or _utc_now()),
-                        "source": str(item.get("source") or "seed_file"),
+                        "source": source,
                         "alpha_id": str(item.get("alpha_id") or ""),
                         "simulation_id": str(item.get("simulation_id") or ""),
                     }
@@ -1854,6 +1942,129 @@ class DreamAlphaDaemon:
         _write_json_atomic(seed_file, normalized)
         return normalized
 
+    def _merge_seed_items(self, seed_items: List[Dict[str, Any]], incoming_items: List[Dict[str, Any]]) -> int:
+        seen = {
+            _normalize_expression(str(item.get("expression") or ""))
+            for item in seed_items
+            if isinstance(item, dict)
+        }
+        added = 0
+        now = _utc_now()
+        for item in incoming_items:
+            if not isinstance(item, dict):
+                continue
+            expr = _normalize_expression(str(item.get("expression") or ""))
+            if not expr or expr in seen:
+                continue
+            source = str(item.get("source") or "seed_merge")
+            fitness = _to_float(item.get("fitness"), 0.0)
+            if _is_user_seed_source(source) and not (fitness > 1.0):
+                continue
+            seen.add(expr)
+            seed_items.append(
+                {
+                    "expression": expr,
+                    "name": str(item.get("name") or ""),
+                    "logic": str(item.get("logic") or ""),
+                    "sharpe": _to_float(item.get("sharpe"), 0.0),
+                    "fitness": fitness,
+                    "created_at": str(item.get("created_at") or now),
+                    "source": source,
+                    "alpha_id": str(item.get("alpha_id") or ""),
+                    "simulation_id": str(item.get("simulation_id") or ""),
+                }
+            )
+            added += 1
+        return added
+
+    def _build_forum_seed_items(self) -> List[Dict[str, Any]]:
+        now = _utc_now()
+        out: List[Dict[str, Any]] = []
+        for row in FORUM_TEMPLATE_SEED_ITEMS:
+            if not isinstance(row, dict):
+                continue
+            expr = _normalize_expression(str(row.get("expression") or ""))
+            if not expr:
+                continue
+            out.append(
+                {
+                    "expression": expr,
+                    "name": str(row.get("name") or ""),
+                    "logic": str(row.get("logic") or ""),
+                    "sharpe": 0.0,
+                    "fitness": 0.0,
+                    "created_at": now,
+                    "source": str(row.get("source") or "forum_seed"),
+                    "alpha_id": "",
+                    "simulation_id": "",
+                }
+            )
+        return out
+
+    def _load_library_seed_items(self, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not _to_bool(cfg.get("seed_from_library_db"), True):
+            return []
+        db_path = Path(str(cfg.get("library_db_file") or "db/factor_library.db"))
+        if not db_path.exists():
+            return []
+        limit = max(0, _to_int(cfg.get("library_seed_limit"), 80))
+        if limit <= 0:
+            return []
+        min_abs_sharpe = _to_float(cfg.get("library_seed_min_abs_sharpe"), 0.0)
+        min_fitness = _to_float(cfg.get("library_seed_min_fitness"), 1.0)
+        out: List[Dict[str, Any]] = []
+        sql = """
+            SELECT
+                expression,
+                COALESCE(json_extract(metrics_json, '$.alpha.is.sharpe'), 0.0) AS sharpe,
+                COALESCE(json_extract(metrics_json, '$.alpha.is.fitness'), 0.0) AS fitness,
+                COALESCE(json_extract(metrics_json, '$.alpha.id'), '') AS alpha_id,
+                COALESCE(created_at, '') AS created_at
+            FROM factors
+            WHERE metrics_json IS NOT NULL
+              AND TRIM(metrics_json) <> ''
+            ORDER BY (ABS(COALESCE(json_extract(metrics_json, '$.alpha.is.sharpe'), 0.0))
+                     + MAX(COALESCE(json_extract(metrics_json, '$.alpha.is.fitness'), 0.0), 0.0)) DESC,
+                     created_at DESC
+            LIMIT ?
+        """
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.cursor()
+                rows = cur.execute(sql, (limit,)).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("load library seeds failed: %s", exc)
+            return []
+
+        now = _utc_now()
+        for expression, sharpe, fitness, alpha_id, created_at in rows:
+            expr = _normalize_expression(str(expression or ""))
+            s = _to_float(sharpe, 0.0)
+            f = _to_float(fitness, 0.0)
+            if not expr:
+                continue
+            if not (f > min_fitness):
+                continue
+            if min_abs_sharpe > 0.0 and abs(s) < min_abs_sharpe:
+                continue
+            out.append(
+                {
+                    "expression": expr,
+                    "name": "library_seed",
+                    "logic": "auto-imported from factor_library.db",
+                    "sharpe": s,
+                    "fitness": f,
+                    "created_at": str(created_at or now),
+                    "source": "factor_library_seed",
+                    "alpha_id": str(alpha_id or ""),
+                    "simulation_id": "",
+                }
+            )
+        return out
+
     def _seed_prompt_lines(self, seed_items: List[Dict[str, Any]], max_count: int) -> List[str]:
         enriched = []
         for item in seed_items:
@@ -1869,8 +2080,6 @@ class DreamAlphaDaemon:
             if not expr:
                 continue
             if "{" in expr or "}" in expr or "same_dataset" in expr.lower():
-                continue
-            if _violates_simple_operator_policy(expr):
                 continue
             sharpe = _to_float(item.get("sharpe"), 0.0)
             fitness = _to_float(item.get("fitness"), 0.0)
@@ -2587,10 +2796,15 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 seed_payload = self._normalize_seed_file(seed_file)
             seed_items = seed_payload.get("items", [])
 
+            forum_added = 0
+            user_added = 0
+            library_added = 0
+            if _to_bool(cfg.get("inject_forum_seed_templates"), True):
+                forum_added = self._merge_seed_items(seed_items, self._build_forum_seed_items())
+
+            user_seed_items: List[Dict[str, Any]] = []
             for expr in cfg.get("seed_expressions") or []:
-                if any(str(it.get("expression")) == expr for it in seed_items):
-                    continue
-                seed_items.append(
+                user_seed_items.append(
                     {
                         "expression": expr,
                         "name": "",
@@ -2603,9 +2817,25 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         "simulation_id": "",
                     }
                 )
+            user_added = self._merge_seed_items(seed_items, user_seed_items)
+            library_added = self._merge_seed_items(seed_items, self._load_library_seed_items(cfg))
             seed_payload["items"] = seed_items
             seed_payload["updated_at"] = _utc_now()
             _write_json_atomic(seed_file, seed_payload)
+
+            with self._lock:
+                self._append_event_locked(
+                    {
+                        "at": _utc_now(),
+                        "type": "seed_refresh",
+                        "seed_file": str(seed_file),
+                        "total_items": len(seed_items),
+                        "forum_added": forum_added,
+                        "user_added": user_added,
+                        "library_added": library_added,
+                    }
+                )
+                self._persist_state_locked()
 
             generator = AlphaGenerator(brain)
             patterns = get_all_patterns() if _to_bool(cfg.get("include_patterns"), True) else None
@@ -3051,8 +3281,10 @@ ON CONFLICT (unique_key) DO UPDATE SET
 
                 stage = self._resolve_stage(best_sharpe, best_fitness)
                 prefer_simple_operators = _to_bool(cfg.get("prefer_simple_operators"), True)
+                enable_negative_flip = _to_bool(cfg.get("enable_negative_flip"), True)
                 target_count = max(1, _to_int(cfg.get("generation_count"), DEFAULT_GENERATION_COUNT))
-                force_shortflip_count = min(2, target_count) if shortflip_queue else 0
+                configured_flip_force_count = max(0, min(target_count, _to_int(cfg.get("negative_flip_force_count"), 2)))
+                force_shortflip_count = configured_flip_force_count if (enable_negative_flip and shortflip_queue) else 0
                 seed_lines = self._seed_prompt_lines(seed_items, cfg.get("max_seed_in_prompt", 20))
                 strict_report_text = self._build_strict_report_text(
                     base_report_text=cfg.get("report_text") or "",
@@ -3843,7 +4075,14 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         ("WEIGHT" in str(name).upper()) or ("UNIT" in str(name).upper())
                         for name in fail_items
                     )
-                    if sharpe <= -1.20 and fitness <= -0.50 and not hard_disqualify:
+                    neg_flip_sharpe_threshold = float(cfg.get("negative_flip_sharpe_threshold", -0.80))
+                    neg_flip_fitness_threshold = float(cfg.get("negative_flip_fitness_threshold", -0.15))
+                    if (
+                        enable_negative_flip
+                        and sharpe <= neg_flip_sharpe_threshold
+                        and fitness <= neg_flip_fitness_threshold
+                        and not hard_disqualify
+                    ):
                         tags.append("CAND_NEG")
                         next_shortflip_sources.append(expr)
 
@@ -3926,14 +4165,12 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         self._persist_state_locked()
 
                     learning_seed = (
-                        (
-                            abs(sharpe) >= float(cfg.get("learning_seed_sharpe_min", 0.20))
-                            or fitness >= float(cfg.get("learning_seed_fitness_min", 0.05))
-                        )
+                        (fitness > float(cfg.get("learning_seed_fitness_min", 1.0)))
                         and platform_operator_count <= int(cfg.get("max_operator_calls", 8))
                         and ("OPERATOR_COUNT" not in fail_items)
                     )
-                    if accepted or learning_seed:
+                    seed_library_qualified = fitness > 1.0
+                    if (accepted or learning_seed) and seed_library_qualified:
                         if not any(str(it.get("expression") or "") == expr for it in seed_items):
                             seed_items.append(
                                 {
@@ -4014,9 +4251,16 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             }
                         )
 
-                shortflip_queue = list(dict.fromkeys(next_shortflip_sources))[:8]
+                next_shortflip_limit = max(1, _to_int(cfg.get("negative_flip_max_seeds"), 8))
+                shortflip_queue = (
+                    list(dict.fromkeys(next_shortflip_sources))[:next_shortflip_limit]
+                    if enable_negative_flip
+                    else []
+                )
                 if shortflip_queue:
-                    next_actions.append(f"inject short-flip >=2 from {len(shortflip_queue)} CAND_NEG seeds")
+                    next_actions.append(
+                        f"inject short-flip >={configured_flip_force_count} from {len(shortflip_queue)} CAND_NEG seeds"
+                    )
                 if stage == "A":
                     next_actions.append("stay Stage A structural exploration (fine-tune forbidden)")
                 else:
