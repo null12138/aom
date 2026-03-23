@@ -463,6 +463,80 @@ def _extract_choice_values(node: Any) -> List[str]:
     return out
 
 
+def _dict_get_ci(node: Any, key: str) -> Any:
+    if not isinstance(node, dict):
+        return None
+    if key in node:
+        return node[key]
+    needle = str(key).strip().upper()
+    for k, v in node.items():
+        if str(k).strip().upper() == needle:
+            return v
+    return None
+
+
+def _choices_for_key(options: Dict[str, Any], key: str, instrument_type: str = "", region: str = "") -> List[str]:
+    node = options.get(key) if isinstance(options, dict) else None
+    choices = node.get("choices") if isinstance(node, dict) else None
+    if choices is None:
+        return []
+
+    # Shape A: choices is already a list of selectable values.
+    if isinstance(choices, list):
+        return _extract_choice_values(choices)
+
+    if not isinstance(choices, dict):
+        return []
+
+    # Shape B: nested by instrumentType.
+    inst_layer = _dict_get_ci(choices, "instrumentType")
+    if inst_layer is None:
+        inst_layer = choices
+
+    # Some schemas keep instrumentType as a plain list.
+    if isinstance(inst_layer, list):
+        return _extract_choice_values(inst_layer)
+
+    if not isinstance(inst_layer, dict):
+        return []
+
+    inst_key = (instrument_type or "EQUITY").strip()
+    inst_node = _dict_get_ci(inst_layer, inst_key)
+    if inst_node is None:
+        # Fallback to first available instrument branch.
+        try:
+            inst_node = next(iter(inst_layer.values()))
+        except StopIteration:
+            return []
+
+    # Region choice itself may be directly a list.
+    if isinstance(inst_node, list):
+        return _extract_choice_values(inst_node)
+
+    if not isinstance(inst_node, dict):
+        return []
+
+    # For keys like delay/universe/neutralization, usually nested by region.
+    region_layer = _dict_get_ci(inst_node, "region")
+    if region_layer is None:
+        # Some schemas may directly use region keys at this level.
+        region_layer = inst_node
+
+    if isinstance(region_layer, list):
+        return _extract_choice_values(region_layer)
+    if not isinstance(region_layer, dict):
+        return []
+
+    region_key = (region or "USA").strip()
+    region_node = _dict_get_ci(region_layer, region_key)
+    if region_node is None:
+        try:
+            region_node = next(iter(region_layer.values()))
+        except StopIteration:
+            return []
+    return _extract_choice_values(region_node)
+
+
 def _pick_choice(options: List[str], default_value: str, title: str) -> str:
     if not options:
         return default_value
@@ -487,30 +561,15 @@ def _pick_choice(options: List[str], default_value: str, title: str) -> str:
 
 
 def _choices_instrument_type(options: Dict[str, Any]) -> List[str]:
-    return _extract_choice_values(((options.get("instrumentType") or {}).get("choices")))
+    return _choices_for_key(options, "instrumentType", instrument_type="", region="")
 
 
 def _choices_region(options: Dict[str, Any], instrument_type: str) -> List[str]:
-    return _extract_choice_values(
-        ((((options.get("region") or {}).get("choices") or {}).get("instrumentType") or {}).get(instrument_type))
-    )
+    return _choices_for_key(options, "region", instrument_type=instrument_type, region="")
 
 
 def _choices_region_dependent(options: Dict[str, Any], key: str, instrument_type: str, region: str) -> List[str]:
-    root = (((options.get(key) or {}).get("choices") or {}).get("instrumentType") or {})
-    inst_node = root.get(instrument_type)
-    if not isinstance(inst_node, dict):
-        return []
-    by_region = inst_node.get("region")
-    if not isinstance(by_region, dict):
-        return []
-    region_node = by_region.get(region)
-    if region_node is None:
-        for k, v in by_region.items():
-            if str(k).strip().upper() == str(region).strip().upper():
-                region_node = v
-                break
-    return _extract_choice_values(region_node)
+    return _choices_for_key(options, key, instrument_type=instrument_type, region=region)
 
 
 def _interactive_settings_overrides(current: Dict[str, Any]) -> Dict[str, Any]:
