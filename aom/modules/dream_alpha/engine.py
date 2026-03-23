@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -3040,6 +3040,8 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         api_base=api_base,
                         use_proxy=cfg.get("use_proxy", False),
                     )
+                    # Pre-login to reduce repeated 401 churn in fallback workers.
+                    worker_client.login()
                     outcome = worker_client.simulate(
                         task.get("sim_payload") or {},
                         max_wait=max_wait_sec,
@@ -3100,47 +3102,85 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     max_workers = max(1, min(sim_concurrency, len(dispatch_tasks)))
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         future_map = {executor.submit(_simulate_single, task): task for task in dispatch_tasks}
-                        for fut in as_completed(future_map):
-                            task = future_map[fut]
-                            try:
-                                one = fut.result()
-                                batch_results.append(one)
-                            except Exception as exc:
-                                expr = str(task.get("expression") or "")
-                                with self._lock:
-                                    self._inc_stat_locked("errors", 1)
-                                    self._inc_cursor_locked("error", 1)
-                                    self._state["last_error"] = f"simulate failed: {exc}"
-                                    self._append_event_locked(
-                                        {
-                                            "at": _utc_now(),
-                                            "type": "error",
-                                            "stage": "simulate_single",
-                                            "expression": expr[:200],
-                                            "message": str(exc),
-                                        }
-                                    )
-                                    self._persist_state_locked()
-                                self._notify("ERROR simulate", f"{exc}\nexpr={expr[:500]}")
+                        fallback_timeout_sec = max(60, max_wait_sec + min(180, max_wait_sec // 3))
+                        try:
+                            for fut in as_completed(future_map, timeout=fallback_timeout_sec):
+                                task = future_map[fut]
+                                try:
+                                    one = fut.result()
+                                    batch_results.append(one)
+                                except Exception as exc:
+                                    expr = str(task.get("expression") or "")
+                                    with self._lock:
+                                        self._inc_stat_locked("errors", 1)
+                                        self._inc_cursor_locked("error", 1)
+                                        self._state["last_error"] = f"simulate failed: {exc}"
+                                        self._append_event_locked(
+                                            {
+                                                "at": _utc_now(),
+                                                "type": "error",
+                                                "stage": "simulate_single",
+                                                "expression": expr[:200],
+                                                "message": str(exc),
+                                            }
+                                        )
+                                        self._persist_state_locked()
+                                    self._notify("ERROR simulate", f"{exc}\nexpr={expr[:500]}")
+                        except FuturesTimeoutError:
+                            pending_tasks: List[Dict[str, Any]] = []
+                            for fut, task in future_map.items():
+                                if fut.done():
+                                    continue
+                                fut.cancel()
+                                pending_tasks.append(task)
+                            with self._lock:
+                                self._inc_stat_locked("errors", 1)
+                                self._inc_cursor_locked("error", 1)
+                                self._state["last_error"] = (
+                                    f"simulate timeout: pending={len(pending_tasks)} after {fallback_timeout_sec}s"
+                                )
+                                self._append_event_locked(
+                                    {
+                                        "at": _utc_now(),
+                                        "type": "error",
+                                        "stage": "simulate_timeout",
+                                        "pending": len(pending_tasks),
+                                        "timeout_sec": fallback_timeout_sec,
+                                        "samples": [
+                                            str(task.get("expression") or "")[:120]
+                                            for task in pending_tasks[:4]
+                                        ],
+                                    }
+                                )
+                                self._persist_state_locked()
+                            self._notify(
+                                "ERROR simulate_timeout",
+                                f"pending={len(pending_tasks)} timeout={fallback_timeout_sec}s",
+                            )
 
-                if len(batch_results) != len(dispatch_tasks):
+                missing_count = max(0, len(dispatch_tasks) - len(batch_results))
+                if missing_count > 0:
                     with self._lock:
                         self._inc_stat_locked("errors", 1)
                         self._inc_cursor_locked("error", 1)
                         self._append_event_locked(
                             {
                                 "at": _utc_now(),
-                                "type": "error",
-                                "stage": "simulate",
-                                "message": f"batch result incomplete: got={len(batch_results)} expected={len(dispatch_tasks)}",
+                                "type": "warn",
+                                "stage": "simulate_partial",
+                                "message": (
+                                    f"batch partial: got={len(batch_results)} "
+                                    f"expected={len(dispatch_tasks)} missing={missing_count}"
+                                ),
                             }
                         )
                         self._persist_state_locked()
-                    mark_no_success("simulate_incomplete", f"got={len(batch_results)} need={len(dispatch_tasks)}")
-                    time.sleep(min(20, cfg["interval_sec"]))
-                    continue
+                    if not batch_results:
+                        mark_no_success("simulate_incomplete", f"got={len(batch_results)} need={len(dispatch_tasks)}")
+                        time.sleep(min(20, cfg["interval_sec"]))
+                        continue
 
-                mark_progress_success("simulate_batch_ok")
+                mark_progress_success("simulate_batch_ok" if missing_count == 0 else "simulate_partial_ok")
                 round_index += 1
                 next_shortflip_sources: List[str] = []
                 round_items_for_file: List[Dict[str, Any]] = []
