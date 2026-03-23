@@ -22,6 +22,15 @@ from ..library.engine import (
 
 logger = logging.getLogger("SubmitterEngine")
 STATE_VERSION = "0.1"
+_SETTINGS_OPTIONS_CACHE: Optional[Dict[str, Any]] = None
+
+UNIVERSE_ALIASES = {
+    "MINIVOL1M": "MINVOL1M",
+}
+
+NEUTRALIZATION_ALIASES = {
+    "FASTFACTORS": "FAST",
+}
 
 class SubmitterError(RuntimeError): pass
 
@@ -394,6 +403,109 @@ def backfill_state(state, adapter, force=False):
     state["in_flight"] = remaining
     return updated
 
+def _extract_choice_values(choices: Any) -> List[Any]:
+    if not isinstance(choices, list):
+        return []
+    out: List[Any] = []
+    for item in choices:
+        if isinstance(item, dict):
+            value = item.get("value", item.get("label"))
+        else:
+            value = item
+        if value is not None:
+            out.append(value)
+    return out
+
+def _load_settings_options() -> Dict[str, Any]:
+    global _SETTINGS_OPTIONS_CACHE
+    if _SETTINGS_OPTIONS_CACHE is not None:
+        return _SETTINGS_OPTIONS_CACHE
+    candidates = [
+        Path("metadata/settings_options.json"),
+        Path(__file__).resolve().parents[3] / "metadata" / "settings_options.json",
+    ]
+    for path in candidates:
+        try:
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    _SETTINGS_OPTIONS_CACHE = raw
+                    return _SETTINGS_OPTIONS_CACHE
+        except Exception:
+            continue
+    _SETTINGS_OPTIONS_CACHE = {}
+    return _SETTINGS_OPTIONS_CACHE
+
+def _valid_choice_values(options: Dict[str, Any], key: str, instrument_type: str, region: str) -> List[Any]:
+    node = options.get(key, {}) if isinstance(options, dict) else {}
+    choices = node.get("choices", {}) if isinstance(node, dict) else {}
+    by_inst = choices.get("instrumentType", {}) if isinstance(choices, dict) else {}
+    inst_node = by_inst.get(instrument_type) if isinstance(by_inst, dict) else None
+    if key == "region":
+        return _extract_choice_values(inst_node)
+    if isinstance(inst_node, dict):
+        by_region = inst_node.get("region")
+        if isinstance(by_region, dict):
+            return _extract_choice_values(by_region.get(region))
+    return []
+
+def _coerce_brain_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(settings)
+    instrument_type = str(out.get("instrumentType", "EQUITY") or "EQUITY").strip().upper()
+    region = str(out.get("region", "USA") or "USA").strip().upper()
+    universe = str(out.get("universe", "TOP3000") or "TOP3000").strip().upper()
+    neutralization = str(out.get("neutralization", "INDUSTRY") or "INDUSTRY").strip().upper()
+    delay = int(out.get("delay", 1) or 1)
+
+    universe = UNIVERSE_ALIASES.get(universe, universe)
+    neutralization = NEUTRALIZATION_ALIASES.get(neutralization, neutralization)
+
+    options = _load_settings_options()
+    if options:
+        valid_regions = [str(v).strip().upper() for v in _valid_choice_values(options, "region", instrument_type, region)]
+        if valid_regions and region not in valid_regions:
+            fallback = "USA" if "USA" in valid_regions else valid_regions[0]
+            logger.warning("invalid region=%s, fallback to %s", region, fallback)
+            region = fallback
+
+        valid_delays = [int(v) for v in _valid_choice_values(options, "delay", instrument_type, region)]
+        if valid_delays and delay not in valid_delays:
+            fallback = 1 if 1 in valid_delays else valid_delays[0]
+            logger.warning("invalid delay=%s for %s/%s, fallback to %s", delay, instrument_type, region, fallback)
+            delay = fallback
+
+        valid_universes = [str(v).strip().upper() for v in _valid_choice_values(options, "universe", instrument_type, region)]
+        if valid_universes and universe not in valid_universes:
+            fallback = "TOP3000" if "TOP3000" in valid_universes else valid_universes[0]
+            logger.warning("invalid universe=%s for %s/%s, fallback to %s", universe, instrument_type, region, fallback)
+            universe = fallback
+
+        valid_neutralizations = [str(v).strip().upper() for v in _valid_choice_values(options, "neutralization", instrument_type, region)]
+        if valid_neutralizations and neutralization not in valid_neutralizations:
+            if "FAST" in valid_neutralizations and neutralization == "FASTFACTORS":
+                fallback = "FAST"
+            elif "INDUSTRY" in valid_neutralizations:
+                fallback = "INDUSTRY"
+            elif "NONE" in valid_neutralizations:
+                fallback = "NONE"
+            else:
+                fallback = valid_neutralizations[0]
+            logger.warning(
+                "invalid neutralization=%s for %s/%s, fallback to %s",
+                neutralization,
+                instrument_type,
+                region,
+                fallback,
+            )
+            neutralization = fallback
+
+    out["instrumentType"] = instrument_type
+    out["region"] = region
+    out["universe"] = universe
+    out["neutralization"] = neutralization
+    out["delay"] = delay
+    return out
+
 def build_brain_settings(s):
     def get_val(keys, default):
         for k in keys:
@@ -407,7 +519,21 @@ def build_brain_settings(s):
                     return default
                 return v
         return default
-    return {"instrumentType": get_val(["instrumentType", "instrument_type"], "EQUITY"), "region": get_val(["region"], "USA"), "universe": get_val(["universe"], "TOP3000"), "delay": int(get_val(["delay"], 1) or 1), "decay": int(get_val(["decay"], 0) or 0), "neutralization": get_val(["neutralization"], "INDUSTRY"), "truncation": float(get_val(["truncation"], 0.08) or 0.08), "pasteurization": get_val(["pasteurization"], "ON"), "unitHandling": get_val(["unitHandling", "unit_handling"], "VERIFY"), "nanHandling": get_val(["nanHandling", "nan_handling"], "OFF"), "language": "FASTEXPR", "visualization": False}
+    settings = {
+        "instrumentType": get_val(["instrumentType", "instrument_type"], "EQUITY"),
+        "region": get_val(["region"], "USA"),
+        "universe": get_val(["universe"], "TOP3000"),
+        "delay": int(get_val(["delay"], 1) or 1),
+        "decay": int(get_val(["decay"], 0) or 0),
+        "neutralization": get_val(["neutralization"], "INDUSTRY"),
+        "truncation": float(get_val(["truncation"], 0.08) or 0.08),
+        "pasteurization": get_val(["pasteurization"], "ON"),
+        "unitHandling": get_val(["unitHandling", "unit_handling"], "VERIFY"),
+        "nanHandling": get_val(["nanHandling", "nan_handling"], "OFF"),
+        "language": "FASTEXPR",
+        "visualization": False,
+    }
+    return _coerce_brain_settings(settings)
 
 def build_brain_payload(item, override=None):
     s = dict(item.get("settings", {}))
