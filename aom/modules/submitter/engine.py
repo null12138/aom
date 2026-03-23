@@ -58,6 +58,83 @@ def _update_stats(state: Dict[str, Any]) -> None:
         for k in ["queue", "in_flight", "completed", "failed"]: 
             stats[k] = len(state.get(k, []))
 
+def _item_key(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    fp = str(item.get("fingerprint") or "").strip()
+    if fp:
+        return fp
+    expr = item.get("expression")
+    settings = item.get("settings")
+    if not isinstance(expr, str) or not isinstance(settings, dict):
+        return ""
+    try:
+        fp = factor_fingerprint(expr, settings)
+    except Exception:
+        return ""
+    item["fingerprint"] = fp
+    return fp
+
+def _collect_item_keys(items: Any) -> set[str]:
+    out: set[str] = set()
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        key = _item_key(item)
+        if key:
+            out.add(key)
+    return out
+
+def _prepare_queue_for_resume(state: Dict[str, Any], retry_failed: bool = False) -> List[Dict[str, Any]]:
+    queue = state.get("queue")
+    if not isinstance(queue, list):
+        queue = []
+    completed_keys = _collect_item_keys(state.get("completed", []))
+    in_flight_keys = _collect_item_keys(state.get("in_flight", []))
+    blocked_keys = completed_keys | in_flight_keys
+
+    failed_items = state.get("failed")
+    if not isinstance(failed_items, list):
+        failed_items = []
+        state["failed"] = failed_items
+    if not retry_failed:
+        blocked_keys |= _collect_item_keys(failed_items)
+
+    retry_pool: List[Dict[str, Any]] = []
+    if retry_failed and failed_items:
+        retry_pool = list(failed_items)
+        state["failed"] = []
+
+    pending: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _append_if_needed(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        key = _item_key(item)
+        dedup_key = key or f"id:{id(item)}"
+        if dedup_key in seen:
+            return
+        seen.add(dedup_key)
+        if key and key in blocked_keys:
+            return
+        status = str(item.get("status") or "queued").lower()
+        if status in {"completed", "submitted", "in_flight"}:
+            return
+        if status == "failed" and not retry_failed:
+            return
+        item["status"] = "queued"
+        item.pop("last_error", None)
+        pending.append(item)
+
+    for item in queue:
+        _append_if_needed(item)
+    for item in retry_pool:
+        _append_if_needed(item)
+
+    state["queue"] = pending
+    return pending
+
 # --- Factor & State Management ---
 
 def load_factors(path: Path) -> List[Dict[str, Any]]:
@@ -152,8 +229,14 @@ def _process_batch(batch: List[Dict[str, Any]], adapter: SubmissionAdapter, stat
         
         # 1. 第一步：仅更新内存状态，锁的范围最小化
         with _state_lock:
+            queue = state.get("queue")
             for item, res in zip(batch, results):
                 item.update({"submission_id": res.submission_id, "status": res.status, "result": res.result, "updated_at": _now()})
+                if isinstance(queue, list):
+                    try:
+                        queue.remove(item)
+                    except ValueError:
+                        pass
                 
                 # 双重保险：同时使用 logger 和 print 确保回传显示
                 if res.status == "completed":
@@ -199,11 +282,17 @@ def _process_batch(batch: List[Dict[str, Any]], adapter: SubmissionAdapter, stat
         logger.error(f"Batch processing failed: {e}")
         # 错误处理也需要加锁
         with _state_lock:
+            queue = state.get("queue")
             for item in batch:
                 if item.get("status") not in ("completed", "submitted"):
                     item["status"] = "failed"
                     item["last_error"] = str(e)
                     state["failed"].append(item)
+                if isinstance(queue, list):
+                    try:
+                        queue.remove(item)
+                    except ValueError:
+                        pass
                 if on_progress:
                     try: on_progress(item)
                     except: pass
@@ -211,7 +300,18 @@ def _process_batch(batch: List[Dict[str, Any]], adapter: SubmissionAdapter, stat
 
 # --- Concurrent Async Engine ---
 
-def run_submitter_concurrent(state: Dict[str, Any], adapter: SubmissionAdapter, concurrency: int = 2, batch_size: int = 3, db_path: Optional[Path] = None, source_file: Optional[Path] = None, stop_event: Optional[threading.Event] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Tuple[Dict[str, Any], int]:
+def run_submitter_concurrent(
+    state: Dict[str, Any],
+    adapter: SubmissionAdapter,
+    concurrency: int = 2,
+    batch_size: int = 3,
+    db_path: Optional[Path] = None,
+    source_file: Optional[Path] = None,
+    max_items: Optional[int] = None,
+    retry_failed: bool = False,
+    stop_event: Optional[threading.Event] = None,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Tuple[Dict[str, Any], int]:
     """高性能并发/多重回测统一引擎"""
     processed = 0
     
@@ -228,17 +328,20 @@ def run_submitter_concurrent(state: Dict[str, Any], adapter: SubmissionAdapter, 
     if state.get("mode") == "stream" and source_file:
         factors_iter = iter_factors(source_file, start_index=state.get("cursor", 0))
     else:
+        pending_queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
         def _q_iter():
-            q = state.get("queue", [])
-            for i, it in enumerate(list(q)): yield i, it
+            for i, it in enumerate(list(pending_queue)):
+                yield i, it
         factors_iter = _q_iter()
 
     all_factors = []
     for idx, item in factors_iter:
         all_factors.append((idx, item))
+        if max_items and max_items > 0 and len(all_factors) >= max_items:
+            break
     
     if not all_factors:
-        if lib_conn: lib_conn.close()
+        _update_stats(state)
         return state, 0
 
     batches = [all_factors[i:i + batch_size] for i in range(0, len(all_factors), batch_size)]
@@ -289,8 +392,16 @@ def run_submitter_concurrent(state: Dict[str, Any], adapter: SubmissionAdapter, 
 
 # --- Legacy Functions (Restored) ---
 
-def run_submitter(state: Dict[str, Any], adapter: SubmissionAdapter, db_path: Optional[Path] = None, max_items: Optional[int] = None, stop_event: Optional[threading.Event] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Tuple[Dict[str, Any], int]:
-    queue = state.get("queue", [])
+def run_submitter(
+    state: Dict[str, Any],
+    adapter: SubmissionAdapter,
+    db_path: Optional[Path] = None,
+    max_items: Optional[int] = None,
+    retry_failed: bool = False,
+    stop_event: Optional[threading.Event] = None,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Tuple[Dict[str, Any], int]:
+    queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
     processed = 0
     lib_conn = lib_connect(db_path) if db_path else None
     if lib_conn: lib_init_db(lib_conn)
@@ -306,7 +417,17 @@ def run_submitter(state: Dict[str, Any], adapter: SubmissionAdapter, db_path: Op
     _update_stats(state)
     return state, processed
 
-def run_submitter_stream(state: Dict[str, Any], adapter: SubmissionAdapter, source_file: Path, start_index: int = 0, db_path: Optional[Path] = None, max_items: Optional[int] = None, stop_event: Optional[threading.Event] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Tuple[Dict[str, Any], int]:
+def run_submitter_stream(
+    state: Dict[str, Any],
+    adapter: SubmissionAdapter,
+    source_file: Path,
+    start_index: int = 0,
+    db_path: Optional[Path] = None,
+    max_items: Optional[int] = None,
+    retry_failed: bool = False,
+    stop_event: Optional[threading.Event] = None,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Tuple[Dict[str, Any], int]:
     processed = 0
     try:
         normalized_start = int(start_index or 0)
@@ -315,6 +436,21 @@ def run_submitter_stream(state: Dict[str, Any], adapter: SubmissionAdapter, sour
     lib_conn = lib_connect(db_path) if db_path else None
     if lib_conn: lib_init_db(lib_conn)
     try:
+        if retry_failed:
+            retry_queue = _prepare_queue_for_resume(state, retry_failed=True)
+            while retry_queue:
+                if stop_event and stop_event.is_set():
+                    break
+                item = retry_queue.pop(0)
+                _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
+                processed += 1
+                if max_items and processed >= max_items:
+                    break
+
+        if max_items and processed >= max_items:
+            _update_stats(state)
+            return state, processed
+
         for idx, item in iter_factors(source_file, start_index=normalized_start):
             if stop_event and stop_event.is_set(): break
             _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
@@ -366,7 +502,9 @@ class BrainApiAdapter(SubmissionAdapter):
             return [SubmissionResult(o.simulation_id, "completed", {"alpha_id": o.alpha_id, "alpha": o.result}) for o in outcomes]
         except Exception as e:
             if stop_event and stop_event.is_set(): raise e
-            logger.warning(f"Multi-sim 整体提交失败，转为逐条重试: {e}")
+            warn_msg = f"Multi-sim 整体提交失败，转为逐条重试: {e}"
+            logger.warning(warn_msg)
+            print(f"\033[1;33m[WARN]\033[0m {warn_msg}")
             res = []
             for it in items:
                 if stop_event and stop_event.is_set(): break

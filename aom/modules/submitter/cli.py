@@ -149,6 +149,8 @@ def submit_run(args: argparse.Namespace) -> int:
             print(str(exc))
             return 1
         if state.get("mode") == "stream":
+            if not ordered:
+                print("state mode=stream detected; forcing ordered mode (sequential). --batch-size/--concurrency are ignored.")
             ordered = True
     else:
         if not args.file:
@@ -156,7 +158,7 @@ def submit_run(args: argparse.Namespace) -> int:
             return 1
         if not args.legacy_queue and _should_stream(Path(args.file)):
             ordered = True
-            print("auto: large file detected, using ordered stream mode")
+            print("auto: large file detected, using ordered stream mode (sequential). --batch-size/--concurrency are ignored.")
         run_id = args.run_id or _new_run_id()
         if ordered:
             state = init_state_stream(
@@ -203,6 +205,7 @@ def submit_run(args: argparse.Namespace) -> int:
 
     try:
         if ordered:
+            print("run mode: ordered stream (sequential submit)")
             source_file = args.file or str(state.get("config", {}).get("source_file") or "")
             if not source_file:
                 print("--file is required for ordered mode")
@@ -216,21 +219,26 @@ def submit_run(args: argparse.Namespace) -> int:
                 adapter=adapter,
                 source_file=Path(source_file),
                 start_index=start_index,
+                retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
             )
         elif (args.concurrency and args.concurrency > 1) or (args.batch_size and args.batch_size > 1):
+            print(f"run mode: concurrent multiple (concurrency={args.concurrency}, batch_size={args.batch_size})")
             state, processed = run_submitter_concurrent(
                 state=state,
                 adapter=adapter,
                 concurrency=args.concurrency,
                 batch_size=args.batch_size,
+                retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
                 source_file=Path(args.file) if args.file else None,
             )
         else:
+            print("run mode: single submit")
             state, processed = run_submitter(
                 state=state,
                 adapter=adapter,
+                retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
             )
     except SubmitterError as exc:
