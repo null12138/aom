@@ -72,6 +72,15 @@ class BrainClient:
             
         return resp
 
+    @staticmethod
+    def _simulation_id_from_location(location: str) -> str:
+        raw = str(location or "").strip()
+        if not raw:
+            return ""
+        if "/" not in raw:
+            return raw
+        return raw.rstrip("/").split("/")[-1]
+
     def login(self) -> None:
         with self._login_lock:
             resp = self.session.post(f"{self.api_base}/authentication", auth=(self.username, self.password), timeout=self.timeout)
@@ -96,6 +105,7 @@ class BrainClient:
         """增强版轮询：更灵敏的响应和心跳"""
         start = time.time()
         url = location if location.startswith("http") else f"{self.api_base}{location}"
+        simulation_id = self._simulation_id_from_location(url)
         
         # 立即触发首次心跳
         if on_heartbeat: on_heartbeat(0)
@@ -107,7 +117,20 @@ class BrainClient:
             
             elapsed = int(time.time() - start)
             if elapsed > max_wait:
-                raise BrainApiError(f"仿真超时 ({max_wait}s)")
+                status_text = "UNKNOWN"
+                detail_msg = ""
+                try:
+                    latest = self._request("GET", url)
+                    if latest.status_code // 100 == 2:
+                        latest_data = latest.json()
+                        status_text = str(latest_data.get("status") or "UNKNOWN")
+                        detail_msg = str(latest_data.get("message") or "").strip()
+                except Exception:
+                    pass
+                extra = f"simulation_id={simulation_id or '-'} status={status_text}"
+                if detail_msg:
+                    extra += f" message={detail_msg}"
+                raise BrainApiError(f"仿真超时 ({max_wait}s) | {extra}")
 
             try:
                 resp = self._request("GET", url)
@@ -117,7 +140,10 @@ class BrainClient:
                     continue
                     
                 if resp.status_code // 100 != 2:
-                    raise BrainApiError(f"poll failed: {resp.status_code} {resp.text}", status_code=resp.status_code)
+                    raise BrainApiError(
+                        f"poll failed: {resp.status_code} {resp.text} | simulation_id={simulation_id or '-'}",
+                        status_code=resp.status_code,
+                    )
 
                 data = resp.json()
                 status = data.get("status")
@@ -125,7 +151,7 @@ class BrainClient:
                 if status == "COMPLETE": return data
                 if status in ("ERROR", "CANCELLED", "CANCELED"):
                     msg = data.get("message", status)
-                    raise BrainApiError(f"Brain 节点任务终止: {msg}")
+                    raise BrainApiError(f"Brain 节点任务终止: {msg} | simulation_id={simulation_id or '-'}")
 
                 # 触发心跳更新 UI
                 if on_heartbeat:
@@ -159,7 +185,8 @@ class BrainClient:
 
         progress = self.poll_simulation(loc, max_wait=max_wait, stop_event=stop_event, on_heartbeat=on_heartbeat)
         alpha_id = progress.get("alpha")
-        if not alpha_id: raise BrainApiError(f"no alpha id returned: {progress}")
+        if not alpha_id:
+            raise BrainApiError(f"no alpha id returned: {progress} | simulation_id={sim_id}")
         
         result = self.get_alpha(str(alpha_id))
         return SimulationOutcome(str(progress.get("id", sim_id)), str(alpha_id), result)
@@ -196,7 +223,9 @@ class BrainClient:
 
         if not alpha_ids:
             # 最后的保命检查：如果确实没拿到 ID，报错让上层重试或降级
-            raise BrainApiError(f"Multiple simulation produced no alpha IDs. Status: {progress.get('status')}")
+            raise BrainApiError(
+                f"Multiple simulation produced no alpha IDs. Status: {progress.get('status')} | simulation_id={parent_sim_id}"
+            )
 
         # 并发获取所有 Alpha 的详细指标，极大缩短心跳停止后的卡顿
         if on_heartbeat: on_heartbeat(-2) # 特殊标记：正在拉取指标详情
