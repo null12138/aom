@@ -978,6 +978,7 @@ class DreamAlphaDaemon:
         self._cfg: Dict[str, Any] = {}
         self._last_error_notify_ts = 0.0
         self._last_notify_transport_warn_ts = 0.0
+        self._last_no_success_notify_ts = 0.0
 
     def _default_state(self) -> Dict[str, Any]:
         return {
@@ -1009,6 +1010,8 @@ class DreamAlphaDaemon:
                 "shortflip_generated": 0,
                 "pg_seed_saved": 0,
                 "pg_seed_errors": 0,
+                "no_success_cycles": 0,
+                "no_success_notified": 0,
             },
             "cursor": {
                 "cycle": 0,
@@ -1048,9 +1051,6 @@ class DreamAlphaDaemon:
         configured = str(self._cfg.get("results_file") or "").strip()
         if configured:
             return Path(configured)
-        baseline_alpha_id = str(self._cfg.get("baseline_alpha_id") or "").strip()
-        if baseline_alpha_id:
-            return Path("runs") / f"{baseline_alpha_id}_optimization_results.txt"
         return Path("runs/dream_alpha_optimization_results.txt")
 
     def _notify_url(self) -> str:
@@ -1058,6 +1058,76 @@ class DreamAlphaDaemon:
 
     def _error_notify_cooldown(self) -> int:
         return max(0, _to_int(self._cfg.get("error_notify_cooldown_sec"), 180))
+
+    def _no_success_notify_every(self) -> int:
+        return max(1, _to_int(self._cfg.get("no_success_notify_every"), 2))
+
+    def _no_success_notify_cooldown(self) -> int:
+        return max(0, _to_int(self._cfg.get("no_success_notify_cooldown_sec"), 180))
+
+    def _format_recent_events_for_notify_locked(self, limit: int = 12) -> str:
+        events = self._state.get("recent_events")
+        if not isinstance(events, list) or not events:
+            return "(no recent events)"
+        lines: List[str] = []
+        for raw in events[-max(1, limit):]:
+            if not isinstance(raw, dict):
+                continue
+            at = str(raw.get("at") or "")[-14:]
+            event_type = str(raw.get("type") or "-")
+            stage = str(raw.get("stage") or "-")
+            message = str(raw.get("message") or "").strip()
+            if not message:
+                reason = str(raw.get("reason") or "").strip()
+                if reason:
+                    message = f"reason={reason}"
+                elif isinstance(raw.get("errors"), list) and raw.get("errors"):
+                    message = "; ".join(str(x) for x in list(raw.get("errors") or [])[:2])
+                elif event_type == "generate_summary":
+                    message = (
+                        f"raw={_to_int(raw.get('raw_generated'), 0)} "
+                        f"kept={_to_int(raw.get('generated'), 0)} "
+                        f"invalid={_to_int(raw.get('local_invalid_skipped'), 0)}"
+                    )
+                elif event_type == "result":
+                    message = (
+                        f"slot={_to_int(raw.get('slot'), 0)} "
+                        f"sharpe={_to_float(raw.get('sharpe'), 0.0):.3f} "
+                        f"fitness={_to_float(raw.get('fitness'), 0.0):.3f}"
+                    )
+                elif event_type == "warn" and stage == "generate_short":
+                    message = f"got={_to_int(raw.get('got'), 0)} need={_to_int(raw.get('need'), 0)}"
+                elif event_type == "warn" and stage == "preflight":
+                    failures = raw.get("failures")
+                    if isinstance(failures, list) and failures:
+                        one = failures[0]
+                        if isinstance(one, dict):
+                            message = str(one.get("error") or one.get("expression") or "")
+            compact = re.sub(r"\s+", " ", message).strip()[:180]
+            line = f"{at} {event_type}/{stage}"
+            if compact:
+                line += f" | {compact}"
+            lines.append(line)
+        return "\n".join(lines) if lines else "(no recent events)"
+
+    def _maybe_notify_no_success(self, cycle: int, reason: str, streak: int, detail: str = "") -> None:
+        every = self._no_success_notify_every()
+        if streak < every or (streak % every) != 0:
+            return
+        cooldown = self._no_success_notify_cooldown()
+        now_ts = time.time()
+        if cooldown > 0 and (now_ts - self._last_no_success_notify_ts) < cooldown:
+            return
+        self._last_no_success_notify_ts = now_ts
+        with self._lock:
+            digest = self._format_recent_events_for_notify_locked(limit=14)
+            self._inc_stat_locked("no_success_notified", 1)
+            self._persist_state_locked()
+        header = f"cycle={cycle} streak={streak} reason={reason}"
+        if detail:
+            header += f"\ndetail={str(detail)[:240]}"
+        body = f"{header}\nRecent logs:\n{digest}"
+        self._notify("NO_SUCCESS", body, force=True)
 
     def _snapshot_locked(self) -> Dict[str, Any]:
         payload = {
@@ -1198,6 +1268,8 @@ class DreamAlphaDaemon:
         out["simulation_concurrency"] = max(1, min(32, _to_int(out.get("simulation_concurrency"), 5)))
         out["max_operator_calls"] = max(1, min(64, _to_int(out.get("max_operator_calls"), 8)))
         out["error_notify_cooldown_sec"] = max(0, _to_int(out.get("error_notify_cooldown_sec"), 180))
+        out["no_success_notify_every"] = max(1, _to_int(out.get("no_success_notify_every"), 2))
+        out["no_success_notify_cooldown_sec"] = max(0, _to_int(out.get("no_success_notify_cooldown_sec"), 180))
         out["sharpe_abs_threshold"] = _to_float(out.get("sharpe_abs_threshold"), 1.0)
         out["fitness_threshold"] = _to_float(out.get("fitness_threshold"), 1.0)
         out["template_sharpe_threshold"] = _to_float(out.get("template_sharpe_threshold"), 1.58)
@@ -1288,6 +1360,8 @@ class DreamAlphaDaemon:
             "mutation_multiplier": cfg["mutation_multiplier"],
             "simulation_concurrency": cfg["simulation_concurrency"],
             "max_operator_calls": cfg["max_operator_calls"],
+            "no_success_notify_every": cfg["no_success_notify_every"],
+            "no_success_notify_cooldown_sec": cfg["no_success_notify_cooldown_sec"],
             "single_dataset_only": cfg["single_dataset_only"],
             "baseline_alpha_id": cfg["baseline_alpha_id"],
             "operators_file": cfg["operators_file"],
@@ -1845,13 +1919,15 @@ ON CONFLICT (unique_key) DO UPDATE SET
             "",
             "WQ_BRAIN_ALPHA_OPTIMIZATION_V1 STRICT MODE:",
             f"- Batch size MUST be exactly {BATCH_SIZE_STRICT}.",
-            "- Freeze baseline core fields; do not replace dataset family.",
+            "- Baseline lock is DISABLED. Do not anchor to a fixed alpha id or one core field set.",
             "- Operator budget target <= 8 per expression.",
             "- Named parameters required for optional arguments.",
             f"- Current stage: Stage {stage}.",
             "- Theme coverage per batch: at least 4 distinct themes from A-F.",
             "- Common operator quota: ts_sum/ts_mean/rank/zscore/winsorize/ts_std_dev/scale/round/trade_when <=2 each batch.",
             "- Explore slots #6-#8 must use >=2 A-F theme operators each and avoid duplicate theme pairs.",
+            "- Preserve validity first: prefer robust transforms (winsorize/zscore/rank/ts_backfill) for noisy fields.",
+            "- Structural novelty > parameter-only tweaks.",
             "",
             "Theme A: trade_when keep if_else nan_mask",
             "Theme B: days_from_last_change filter group_backfill hump hump_decay jump_decay kth_element last_diff_value ts_backfill",
@@ -1860,14 +1936,14 @@ ON CONFLICT (unique_key) DO UPDATE SET
             "Theme E: ts_co_kurtosis ts_co_skewness ts_corr ts_covariance ts_partial_corr ts_triple_corr",
             "Theme F: inst_pnl inst_tvr one_side rank_by_side scale scale_down ts_delta_limit ts_target_tvr_decay ts_target_tvr_delta_limit ts_target_tvr_hump",
             "",
-            f"Baseline expression (locked core): {baseline_expression}",
-            f"Core fields: {', '.join(core_fields) if core_fields else '-'}",
+            f"Reference expression (soft hint only): {baseline_expression if baseline_expression else '-'}",
+            f"Reference fields (soft hint only): {', '.join(core_fields) if core_fields else '-'}",
             f"Require at least {max(0, force_count)} short-flip candidates from queue in this round.",
         ]
         if stage == "A":
             lines.extend(
                 [
-                    "- Stage A: pure parameter tweaks are FORBIDDEN.",
+                    "- Stage A: pure parameter tweaks are FORBIDDEN when a meaningful reference expression exists.",
                     "- Stage A quota suggestion: structural>=3, same-dataset-combo>=3, PV semantic>=2.",
                 ]
             )
@@ -2113,13 +2189,16 @@ ON CONFLICT (unique_key) DO UPDATE SET
             operators_refresh_interval_sec = int(cfg.get("operators_refresh_interval_sec", 1800))
             settings_checked = False
 
-            baseline_alpha_id = str(cfg.get("baseline_alpha_id") or "").strip()
+            requested_baseline_alpha_id = str(cfg.get("baseline_alpha_id") or "").strip()
+            baseline_alpha_id = ""
             baseline_expression = ""
             core_fields: List[str] = []
             core_datasets: List[str] = []
             allowed_fields: List[str] = []
             shortflip_queue: List[str] = []
             round_index = 0
+            no_success_streak = 0
+            current_cycle = 0
 
             best_sharpe = 0.0
             best_fitness = 0.0
@@ -2155,6 +2234,46 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 ),
                 force=True,
             )
+
+            def mark_no_success(reason: str, detail: str = "") -> None:
+                nonlocal no_success_streak, current_cycle
+                no_success_streak += 1
+                detail_text = re.sub(r"\s+", " ", str(detail or "")).strip()[:240]
+                with self._lock:
+                    self._inc_stat_locked("no_success_cycles", 1)
+                    optimizer = self._state.setdefault("optimizer", {})
+                    optimizer["no_success_streak"] = no_success_streak
+                    optimizer["last_no_success_reason"] = reason
+                    self._append_event_locked(
+                        {
+                            "at": _utc_now(),
+                            "type": "warn",
+                            "stage": "no_success",
+                            "cycle": current_cycle,
+                            "reason": reason,
+                            "detail": detail_text,
+                            "streak": no_success_streak,
+                        }
+                    )
+                    self._persist_state_locked()
+                self._maybe_notify_no_success(
+                    cycle=current_cycle,
+                    reason=reason,
+                    streak=no_success_streak,
+                    detail=detail_text,
+                )
+
+            def mark_progress_success(marker: str = "") -> None:
+                nonlocal no_success_streak
+                if no_success_streak <= 0:
+                    return
+                no_success_streak = 0
+                with self._lock:
+                    optimizer = self._state.setdefault("optimizer", {})
+                    optimizer["no_success_streak"] = 0
+                    if marker:
+                        optimizer["last_success_marker"] = str(marker)[:120]
+                    self._persist_state_locked()
 
             while not stop_event.is_set():
                 now_ts = time.time()
@@ -2367,62 +2486,46 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     continue
 
                 if not baseline_initialized:
-                    if baseline_alpha_id:
-                        try:
-                            baseline_details = client.get_alpha(baseline_alpha_id)
-                            fetched_expr = self._extract_baseline_expression(baseline_details)
-                            if fetched_expr:
-                                baseline_expression = fetched_expr
-                        except Exception as exc:
-                            with self._lock:
-                                self._append_event_locked(
-                                    {
-                                        "at": _utc_now(),
-                                        "type": "warn",
-                                        "stage": "baseline_fetch",
-                                        "alpha_id": baseline_alpha_id,
-                                        "message": str(exc),
-                                    }
-                                )
-                                self._persist_state_locked()
-
-                    if not baseline_expression:
-                        seed_expr = ""
-                        if seed_items:
-                            sorted_seed = sorted(
-                                seed_items,
-                                key=lambda item: (
-                                    _to_float(item.get("sharpe"), -999.0),
-                                    _to_float(item.get("fitness"), -999.0),
-                                ),
-                                reverse=True,
+                    if requested_baseline_alpha_id:
+                        with self._lock:
+                            self._append_event_locked(
+                                {
+                                    "at": _utc_now(),
+                                    "type": "warn",
+                                    "stage": "baseline_disabled",
+                                    "alpha_id": requested_baseline_alpha_id,
+                                    "message": "baseline setting ignored; lock disabled",
+                                }
                             )
-                            if sorted_seed:
-                                seed_expr = _normalize_expression(str(sorted_seed[0].get("expression") or ""))
-                        baseline_expression = seed_expr
+                            self._persist_state_locked()
 
-                    if not baseline_expression:
-                        raise RuntimeError("baseline expression missing: provide baseline_alpha_id or seed expressions")
+                    if not baseline_expression and seed_items:
+                        sorted_seed = sorted(
+                            seed_items,
+                            key=lambda item: (
+                                _to_float(item.get("sharpe"), -999.0),
+                                _to_float(item.get("fitness"), -999.0),
+                            ),
+                            reverse=True,
+                        )
+                        if sorted_seed:
+                            baseline_expression = _normalize_expression(str(sorted_seed[0].get("expression") or ""))
 
-                    freeze_info = self._freeze_baseline_fields(baseline_expression, fields_for_generation)
-                    core_fields = list(freeze_info.get("core_fields") or [])
-                    core_datasets = list(freeze_info.get("core_datasets") or [])
-                    allowed_fields = list(freeze_info.get("allowed_fields") or [])
                     baseline_initialized = True
                     with self._lock:
                         optimizer = self._state.setdefault("optimizer", {})
-                        optimizer["baseline_alpha_id"] = baseline_alpha_id
+                        optimizer["baseline_alpha_id"] = ""
                         optimizer["baseline_expression"] = baseline_expression
-                        optimizer["core_fields"] = list(core_fields)
-                        optimizer["core_datasets"] = list(core_datasets)
+                        optimizer["core_fields"] = []
+                        optimizer["core_datasets"] = []
                         optimizer["stage"] = self._resolve_stage(best_sharpe, best_fitness)
                         self._append_event_locked(
                             {
                                 "at": _utc_now(),
-                                "type": "baseline",
-                                "alpha_id": baseline_alpha_id,
-                                "core_fields": list(core_fields),
-                                "core_datasets": list(core_datasets),
+                                "type": "optimizer",
+                                "stage": "baseline_disabled",
+                                "message": "baseline lock disabled; using free structural exploration",
+                                "reference_expression": baseline_expression[:220],
                             }
                         )
                         self._persist_state_locked()
@@ -2432,6 +2535,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     self._state["last_cycle_at"] = cycle_started_at
                     self._inc_stat_locked("cycles", 1)
                     self._inc_cursor_locked("cycle", 1)
+                    current_cycle = _to_int(_dig(self._state, ["cursor", "cycle"]), 0)
                     self._persist_state_locked()
 
                 known_exprs = set(str(x) for x in self._state.get("seen_expressions", []))
@@ -2478,9 +2582,9 @@ ON CONFLICT (unique_key) DO UPDATE SET
                 generation_context["single_dataset_only"] = _to_bool(cfg.get("single_dataset_only"), True)
                 generation_context["max_operator_calls"] = int(cfg.get("max_operator_calls", 8))
                 generation_context["stage"] = stage
-                generation_context["baseline_expression"] = baseline_expression
-                generation_context["core_fields"] = list(core_fields)
                 generation_context["strict_batch_size"] = BATCH_SIZE_STRICT
+                if baseline_expression:
+                    generation_context["reference_expression"] = baseline_expression
 
                 target_count = BATCH_SIZE_STRICT
                 generation_attempts = max(int(cfg.get("generation_attempts", 3)), 3)
@@ -2514,16 +2618,8 @@ ON CONFLICT (unique_key) DO UPDATE SET
                                 break
                             if not flip_expr or flip_expr in known_exprs or flip_expr in candidate_exprs:
                                 continue
-                            if stage == "A" and _is_pure_parameter_tweak(flip_expr, baseline_expression):
+                            if stage == "A" and baseline_expression and _is_pure_parameter_tweak(flip_expr, baseline_expression):
                                 stage_tune_skipped += 1
-                                continue
-                            if not self._candidate_respects_core_lock(
-                                flip_expr,
-                                field_ids_for_detection,
-                                core_fields,
-                                allowed_fields,
-                            ):
-                                core_lock_skipped += 1
                                 continue
                             validation = _validate_expression_locally(
                                 flip_expr,
@@ -2585,16 +2681,8 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             continue
                         if expr in known_exprs or expr in candidate_exprs:
                             continue
-                        if stage == "A" and _is_pure_parameter_tweak(expr, baseline_expression):
+                        if stage == "A" and baseline_expression and _is_pure_parameter_tweak(expr, baseline_expression):
                             stage_tune_skipped += 1
-                            continue
-                        if not self._candidate_respects_core_lock(
-                            expr,
-                            field_ids_for_detection,
-                            core_fields,
-                            allowed_fields,
-                        ):
-                            core_lock_skipped += 1
                             continue
                         op_calls = _count_operator_calls(expr)
                         if op_calls > int(cfg.get("max_operator_calls", 8)):
@@ -2661,6 +2749,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         )
                         self._persist_state_locked()
                     self._notify("ERROR generate", str(generate_error))
+                    mark_no_success("generate_error", str(generate_error))
                     backoff = min(300, max(5, cfg["interval_sec"] * (2 ** min(failure_streak, 6))))
                     for _ in range(backoff):
                         if stop_event.is_set():
@@ -2721,6 +2810,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             }
                         )
                         self._persist_state_locked()
+                    mark_no_success("generate_short", f"got={len(generated)} need={target_count}")
                     time.sleep(min(15, cfg["interval_sec"]))
                     continue
 
@@ -2741,6 +2831,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             }
                         )
                         self._persist_state_locked()
+                    mark_no_success("quota_reject", "; ".join(str(x) for x in list(quota_report.get("errors") or [])[:2]))
                     time.sleep(min(15, cfg["interval_sec"]))
                     continue
 
@@ -2839,6 +2930,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             }
                         )
                         self._persist_state_locked()
+                    mark_no_success("preflight_short", f"dispatch={len(dispatch_tasks)} need={target_count}")
                     time.sleep(min(15, cfg["interval_sec"]))
                     continue
 
@@ -2983,9 +3075,11 @@ ON CONFLICT (unique_key) DO UPDATE SET
                             }
                         )
                         self._persist_state_locked()
+                    mark_no_success("simulate_incomplete", f"got={len(batch_results)} need={len(dispatch_tasks)}")
                     time.sleep(min(20, cfg["interval_sec"]))
                     continue
 
+                mark_progress_success("simulate_batch_ok")
                 round_index += 1
                 next_shortflip_sources: List[str] = []
                 round_items_for_file: List[Dict[str, Any]] = []
@@ -3235,10 +3329,10 @@ ON CONFLICT (unique_key) DO UPDATE SET
                     self._inc_stat_locked("round_batches", 1)
                     optimizer = self._state.setdefault("optimizer", {})
                     optimizer["stage"] = stage
-                    optimizer["baseline_alpha_id"] = baseline_alpha_id
+                    optimizer["baseline_alpha_id"] = ""
                     optimizer["baseline_expression"] = baseline_expression
-                    optimizer["core_fields"] = list(core_fields)
-                    optimizer["core_datasets"] = list(core_datasets)
+                    optimizer["core_fields"] = []
+                    optimizer["core_datasets"] = []
                     optimizer["shortflip_queue_size"] = len(shortflip_queue)
                     optimizer["last_round_file"] = round_file
                     self._persist_state_locked()
@@ -3249,7 +3343,7 @@ ON CONFLICT (unique_key) DO UPDATE SET
                         (
                             f"alpha={done_alpha_id}\n"
                             f"stage={stage}\n"
-                            f"baseline={baseline_alpha_id}\n"
+                            f"reference={baseline_expression[:200] if baseline_expression else '-'}\n"
                             f"expr={done_expr[:600]}"
                         ),
                         force=True,

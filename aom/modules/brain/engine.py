@@ -199,6 +199,8 @@ class AlphaGenerator:
         single_dataset_only = bool(context.get("single_dataset_only")) if isinstance(context, dict) else False
         mutation_mode = str(context.get("mutation_mode") or "").lower() if isinstance(context, dict) else ""
         max_operator_calls = int(context.get("max_operator_calls", 8)) if isinstance(context, dict) else 8
+        stage = str(context.get("stage") or "").strip().upper() if isinstance(context, dict) else ""
+        reference_expression = str(context.get("reference_expression") or "").strip() if isinstance(context, dict) else ""
         
         if operators:
             ops_str = "Available FastExpr Operators (Dynamic from API):\n"
@@ -223,15 +225,18 @@ class AlphaGenerator:
 
         extra_rules = []
         if mutation_mode == "max":
-            extra_rules.append("8. Mutation Mode MAX: force large operator-tree differences between candidates.")
+            extra_rules.append("12. Mutation Mode MAX: enforce large operator-tree differences between candidates.")
         if single_dataset_only:
-            extra_rules.append("9. Single Dataset ONLY: every expression must stay within one dataset family.")
+            extra_rules.append("13. Single Dataset ONLY: every expression must stay within one dataset family.")
         extra_rules_str = "\n".join(extra_rules)
+        stage_str = f"- Stage: {stage}\n" if stage else ""
+        reference_str = f"- Soft reference expression: {reference_expression}\n" if reference_expression else ""
 
-        return f"""You are a Quantitative Analyst for WorldQuant Brain. 
-Generate {count} Alphas for the following market and datasets:
+        return f"""You are a senior WorldQuant Brain alpha researcher.
+Generate {count} mutually diverse, simulation-ready alphas.
 
 {ctx_str}
+{stage_str}{reference_str}
 
 {ops_str}
 
@@ -241,19 +246,32 @@ Generate {count} Alphas for the following market and datasets:
 Available Data Fields:
 {fields_str}
 
-STRICT REQUIREMENTS:
+INTERNAL WORKFLOW (think silently, do not output this workflow):
+A. Build candidate pool across different motifs: momentum/reversal, volatility/dispersion, fundamental quality/value, regime/filtering.
+B. Use varied horizons and operator families to reduce structural correlation.
+C. Prefer robust transforms for noisy fields: winsorize/zscore/rank/ts_backfill when helpful.
+D. Before finalizing, run a strict syntax and argument-count self-check for every expression.
+E. Reject template clones; each candidate must differ in both signal source and transform path.
+
+STRICT REQUIREMENTS (hard constraints):
 1. Syntax: MUST use WorldQuant Brain FastExpr syntax (e.g., ts_rank, ts_delta, ts_av, group_rank).
 2. Format: Output valid JSON object with key 'alphas'. Each alpha must have 'name', 'expression', and 'logic'.
 3. Regional Compliance: Tailor the logic and operators to the current region ({context.get('region') if context else 'Global'}).
 4. Data Types: Respect MATRIX vs GROUP data types for fields.
 5. Operator Arity: STRICTLY follow each operator Sign/signature input count from the operator list. Never guess argument count.
-6. Mutation Diversity: maximize structural mutation between alphas (different operator families/lookbacks/transforms), avoid near-duplicates.
-7. Dataset Constraint: each expression may only use fields from one dataset family; do not mix fields across different datasets.
-8. Field Scope: only use fields listed in "Available Data Fields".
-9. Operator Budget: each expression must use at most {max_operator_calls} operator calls.
+6. Field Scope: only use fields listed in "Available Data Fields". Do not invent field names.
+7. Operator Budget: each expression must use at most {max_operator_calls} operator calls.
+8. Avoid placeholders or pseudo variables (e.g., x, y, alpha, beta, same_dataset, d).
+9. Avoid near-duplicates: candidates must not be simple sign flips or tiny parameter edits of each other.
+10. Use stable naming: "name" should be concise and unique; "logic" should explain edge in <= 30 words.
+11. Output exactly {count} items in "alphas".
 {extra_rules_str}
 
-Example:
+OUTPUT CONTRACT:
+- Return JSON only. No markdown fences, no extra prose.
+- Must parse with `json.loads`.
+
+Example output:
 {{
   "alphas": [
     {{
@@ -264,4 +282,4 @@ Example:
   ]
 }}
 
-NOW, generate {count} alphas:"""
+Now generate exactly {count} alphas:"""

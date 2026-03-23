@@ -648,6 +648,8 @@ class AOMHandler(BaseHTTPRequestHandler):
                 "max_wait_sec": payload.get("max_wait_sec", 1800),
                 "auth_refresh_interval_sec": payload.get("auth_refresh_interval_sec", 900),
                 "operators_refresh_interval_sec": payload.get("operators_refresh_interval_sec", 1800),
+                "no_success_notify_every": payload.get("no_success_notify_every", 2),
+                "no_success_notify_cooldown_sec": payload.get("no_success_notify_cooldown_sec", 180),
                 "single_dataset_only": payload.get("single_dataset_only", True),
                 "baseline_alpha_id": str(payload.get("baseline_alpha_id") or ""),
                 "force_stage": str(payload.get("force_stage") or ""),

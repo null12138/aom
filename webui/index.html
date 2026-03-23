@@ -234,14 +234,15 @@
                 <label>轮询间隔(秒)<input type="number" id="dream_interval_sec" value="30" min="5" max="3600" /></label>
                 <label>单次回测超时(秒)<input type="number" id="dream_max_wait_sec" value="1800" min="60" max="7200" /></label>
                 <label>错误推送冷却(秒)<input type="number" id="dream_error_cooldown_sec" value="180" min="0" max="3600" /></label>
+                <label>未成功推送冷却(秒)<input type="number" id="dream_no_success_notify_cooldown_sec" value="180" min="0" max="3600" /></label>
                 <label>认证刷新间隔(秒)<input type="number" id="dream_auth_refresh_sec" value="900" min="60" max="86400" /></label>
                 <label>操作符刷新间隔(秒)<input type="number" id="dream_operator_refresh_sec" value="1800" min="60" max="86400" /></label>
               </div>
               <div class="grid" style="margin-top: 10px;">
-                <label>Baseline Alpha ID<input id="dream_baseline_alpha_id" placeholder="例如: LLbaqEqa" /></label>
+                <label>未成功推送步长(轮)<input type="number" id="dream_no_success_notify_every" value="2" min="1" max="20" /></label>
                 <label>Stage 覆盖(可选)<input id="dream_force_stage" placeholder="A 或 B，不填则自动判定" /></label>
                 <label>算子库文件<input id="dream_operators_file" value="metadata/operators.json" /></label>
-                <label>轮次结果日志文件<input id="dream_results_file" placeholder="留空自动使用 runs/<baseline>_optimization_results.txt" /></label>
+                <label>轮次结果日志文件<input id="dream_results_file" placeholder="留空自动使用 runs/dream_alpha_optimization_results.txt" /></label>
               </div>
               <div class="grid" style="margin-top: 10px;">
                 <label>|Sharpe|阈值<input type="number" id="dream_sharpe_abs_threshold" value="1.0" step="0.01" /></label>
