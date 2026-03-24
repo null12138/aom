@@ -6,6 +6,7 @@ import threading
 import time
 import asyncio
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -431,6 +432,15 @@ def run_submitter_concurrent(
     except Exception as e:
         logger.error(f"Async engine runtime error: {e}")
         if on_progress: on_progress({"status": "ERROR", "expression": f"引擎运行出错: {e}"})
+
+    # Opportunistic one-shot backfill to reduce leftover in_flight tasks.
+    if state.get("in_flight") and hasattr(adapter, "backfill"):
+        try:
+            updated = backfill_state(state, adapter=adapter, force=False)
+            if updated and on_progress:
+                on_progress({"status": "BACKFILLED", "count": updated})
+        except Exception as e:
+            logger.warning(f"post-run backfill failed: {e}")
     
     _update_stats(state)
     return state, processed
@@ -467,6 +477,16 @@ def run_submitter(
             if max_items and processed >= max_items: break
     finally:
         if lib_conn: lib_conn.close()
+
+    # Opportunistic one-shot backfill to reduce leftover in_flight tasks.
+    if state.get("in_flight") and hasattr(adapter, "backfill"):
+        try:
+            updated = backfill_state(state, adapter=adapter, force=False)
+            if updated and on_progress:
+                on_progress({"status": "BACKFILLED", "count": updated})
+        except Exception as e:
+            logger.warning(f"post-run backfill failed: {e}")
+
     _update_stats(state)
     return state, processed
 
@@ -494,6 +514,15 @@ class BrainApiAdapter(SubmissionAdapter):
 
     def get_simulation_url(self, simulation_id: str) -> str:
         return self.client.get_simulation_url(simulation_id)
+
+    def backfill(self, item):
+        simulation_id = str(item.get("submission_id") or "").strip()
+        if not simulation_id:
+            return {}
+        try:
+            return self.client.get_simulation(simulation_id)
+        except Exception:
+            return {}
 
     def submit(self, item, stop_event=None, on_heartbeat=None):
         self.ensure_login()
@@ -571,18 +600,31 @@ class BrainBackfillAdapter(BackfillAdapter):
 def backfill_state(state, adapter, force=False):
     in_flight = state.get("in_flight", [])
     if not in_flight: return 0
-    updated = 0
-    remaining = []
-    for item in in_flight:
+    items = list(in_flight)
+    workers = min(max(1, len(items)), 12)
+
+    def _fetch(item: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         try:
-            res = adapter.backfill(item)
-            if res and res.get("status") == "COMPLETE":
-                item["status"] = "completed"
-                item["result"] = {"alpha_id": res.get("alpha"), "alpha": res}
-                state["completed"].append(item)
-                updated += 1
-            else: remaining.append(item)
-        except: remaining.append(item)
+            return item, adapter.backfill(item) or {}
+        except Exception:
+            return item, {}
+
+    if workers == 1:
+        fetched = [_fetch(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            fetched = list(executor.map(_fetch, items))
+
+    updated = 0
+    remaining: List[Dict[str, Any]] = []
+    for item, res in fetched:
+        if res and res.get("status") == "COMPLETE":
+            item["status"] = "completed"
+            item["result"] = {"alpha_id": res.get("alpha"), "alpha": res}
+            state["completed"].append(item)
+            updated += 1
+        else:
+            remaining.append(item)
     state["in_flight"] = remaining
     return updated
 
