@@ -105,11 +105,59 @@ class BrainClient:
                 raise BrainAuthError("persona authentication required", status_code=401)
             raise BrainAuthError(f"authentication failed: {resp.status_code} {resp.text}", status_code=resp.status_code)
 
+    @staticmethod
+    def _retry_after_seconds(resp: requests.Response, default_wait: int) -> int:
+        header = str(resp.headers.get("Retry-After", "")).strip()
+        if header.isdigit():
+            return max(1, int(header))
+        return max(1, int(default_wait))
+
     def start_simulation(self, payload: Dict[str, Any]) -> requests.Response:
-        resp = self._request("POST", f"{self.api_base}/simulations", json=payload)
-        if resp.status_code // 100 != 2:
-            raise BrainApiError(f"simulation start failed: {resp.status_code} {resp.text}", status_code=resp.status_code)
-        return resp
+        # 长跑批量提交时，平台会出现短时 429/5xx；这里做退避重试，避免“后半程全失败”。
+        max_attempts = 6
+        for attempt in range(1, max_attempts + 1):
+            resp = self._request("POST", f"{self.api_base}/simulations", json=payload)
+            if resp.status_code // 100 == 2:
+                return resp
+
+            status = int(resp.status_code)
+            body = (resp.text or "").strip()
+            lower_body = body.lower()
+            base_wait = min(60, 2 ** min(attempt, 5))
+
+            recoverable_400 = (
+                status == 400
+                and any(
+                    token in lower_body
+                    for token in (
+                        "too many",
+                        "rate limit",
+                        "active simulation",
+                        "temporar",
+                    )
+                )
+            )
+            recoverable_status = status in {429, 500, 502, 503, 504}
+
+            if attempt < max_attempts and (recoverable_status or recoverable_400):
+                wait_s = self._retry_after_seconds(resp, base_wait)
+                logger.warning(
+                    "simulation start transient failure (attempt=%s/%s, status=%s), retry in %ss: %s",
+                    attempt,
+                    max_attempts,
+                    status,
+                    wait_s,
+                    body,
+                )
+                time.sleep(wait_s)
+                continue
+
+            raise BrainApiError(
+                f"simulation start failed: {status} {body}",
+                status_code=status,
+            )
+
+        raise BrainApiError("simulation start failed after retries")
 
     def poll_simulation(
         self, 

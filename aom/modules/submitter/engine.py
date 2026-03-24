@@ -294,6 +294,7 @@ def _process_batch(batch: List[Dict[str, Any]], adapter: SubmissionAdapter, stat
         return len(batch)
     except Exception as e:
         logger.error(f"Batch processing failed: {e}")
+        print(f"\033[1;31m[BATCH FAILED]\033[0m {e}")
         # 错误处理也需要加锁
         with _state_lock:
             queue = state.get("queue")
