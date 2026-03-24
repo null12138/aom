@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..library.engine import (
 logger = logging.getLogger("SubmitterEngine")
 STATE_VERSION = "0.1"
 _SETTINGS_OPTIONS_CACHE: Optional[Dict[str, Any]] = None
+_SIM_ID_RE = re.compile(r"simulation_id=([A-Za-z0-9]+)")
 
 UNIVERSE_ALIASES = {
     "MINIVOL1M": "MINVOL1M",
@@ -49,6 +51,54 @@ class BackfillAdapter:
 
 # --- Helper Functions ---
 def _now() -> str: return datetime.now().isoformat(timespec="seconds")
+
+def _extract_simulation_id_from_error(exc: Exception) -> str:
+    text = str(exc or "")
+    match = _SIM_ID_RE.search(text)
+    if not match:
+        return ""
+    sim_id = str(match.group(1) or "").strip()
+    if sim_id and sim_id != "-":
+        return sim_id
+    return ""
+
+def _is_uncertain_polling_error(exc: Exception) -> bool:
+    text = str(exc or "")
+    lower = text.lower()
+    if "brain 节点任务终止" in text:
+        return False
+    if "simulation start failed" in lower:
+        return False
+    if "no alpha id returned" in lower:
+        return False
+    text_tokens = ("仿真超时",)
+    lower_tokens = (
+        "read timed out",
+        "connection aborted",
+        "remote end closed",
+        "connection reset",
+        "network error",
+    )
+    return any(tok in text for tok in text_tokens) or any(tok in lower for tok in lower_tokens)
+
+def _is_multi_retryable_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    retry_tokens = (
+        "too many",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "temporar",
+        "connection aborted",
+        "remote end closed",
+        "mismatched alpha count",
+        "multiple simulation produced no alpha ids",
+    )
+    return any(tok in text for tok in retry_tokens)
 
 _state_lock = threading.Lock()
 
@@ -448,8 +498,24 @@ class BrainApiAdapter(SubmissionAdapter):
     def submit(self, item, stop_event=None, on_heartbeat=None):
         self.ensure_login()
         payload = build_brain_payload(item, self.settings_override)
-        out = self.client.simulate(payload, max_wait=self.max_wait, stop_event=stop_event, on_heartbeat=on_heartbeat)
-        return SubmissionResult(out.simulation_id, "completed", {"alpha_id": out.alpha_id, "alpha": out.result})
+        try:
+            out = self.client.simulate(payload, max_wait=self.max_wait, stop_event=stop_event, on_heartbeat=on_heartbeat)
+            return SubmissionResult(out.simulation_id, "completed", {"alpha_id": out.alpha_id, "alpha": out.result})
+        except Exception as exc:
+            sim_id = _extract_simulation_id_from_error(exc)
+            if sim_id and _is_uncertain_polling_error(exc):
+                warn_msg = (
+                    f"回测轮询异常，任务转为 in_flight 待回填 "
+                    f"(simulation_id={sim_id}): {exc}"
+                )
+                logger.warning(warn_msg)
+                print(f"\033[1;33m[WARN]\033[0m {warn_msg}")
+                return SubmissionResult(
+                    sim_id,
+                    "in_flight",
+                    {"pending_backfill": True, "error": str(exc)},
+                )
+            raise
 
     def submit_multiple(self, items, stop_event=None, on_heartbeat=None):
         self.ensure_login()
@@ -461,7 +527,22 @@ class BrainApiAdapter(SubmissionAdapter):
             outcomes = self.client.simulate_multiple(payloads, max_wait=self.max_wait, stop_event=stop_event, on_heartbeat=on_heartbeat)
             return [SubmissionResult(o.simulation_id, "completed", {"alpha_id": o.alpha_id, "alpha": o.result}) for o in outcomes]
         except Exception as e:
-            if stop_event and stop_event.is_set(): raise e
+            if stop_event and stop_event.is_set():
+                raise e
+
+            # Prefer split-and-retry for medium/large batches to preserve throughput.
+            if len(items) >= 4 and _is_multi_retryable_error(e):
+                mid = len(items) // 2
+                warn_msg = (
+                    f"Multi-sim 批量提交失败，拆分重试 "
+                    f"(size={len(items)} => {mid}+{len(items)-mid}): {e}"
+                )
+                logger.warning(warn_msg)
+                print(f"\033[1;33m[WARN]\033[0m {warn_msg}")
+                left = self.submit_multiple(items[:mid], stop_event=stop_event, on_heartbeat=on_heartbeat)
+                right = self.submit_multiple(items[mid:], stop_event=stop_event, on_heartbeat=on_heartbeat)
+                return left + right
+
             warn_msg = f"Multi-sim 整体提交失败，转为逐条重试: {e}"
             logger.warning(warn_msg)
             print(f"\033[1;33m[WARN]\033[0m {warn_msg}")
