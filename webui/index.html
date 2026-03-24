@@ -173,9 +173,25 @@
                 <label>因子库 (DB)<select id="lib_db"></select></label>
                 <label>最大等待秒<input id="submit_max_wait" type="number" value="1800" /></label>
                 <label>并发数<input id="submit_concurrency" type="number" min="1" max="8" value="1" /></label>
+                <label>批大小<input id="submit_batch_size" type="number" min="1" max="10" value="4" /></label>
+                <label>起始偏移<input id="submit_start" type="number" min="0" value="0" /></label>
+                <label>最大提交数(0=全部)<input id="submit_max_items" type="number" min="0" value="0" /></label>
+                <label>失败熔断数(0=关闭)<input id="submit_max_failed" type="number" min="0" value="0" /></label>
+                <label>运行预设
+                  <select id="submit_profile">
+                    <option value="stable">稳态 (2x3)</option>
+                    <option value="balanced" selected>平衡 (3x5)</option>
+                    <option value="turbo">冲刺 (4x6)</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
                 <label style="flex-direction: row; gap: 8px; align-items: center; margin-top: 20px;">
                   <input type="checkbox" id="submit_retry_failed" /> 重试失败项
                 </label>
+              </div>
+              <div class="row" style="margin-top: 10px;">
+                <button class="btn-secondary" data-action="submitApplyProfile">应用预设</button>
+                <span class="muted">推荐先用平衡档，网络不稳切到稳态，链路稳定后再冲刺。</span>
               </div>
               <div class="row" style="margin-top: 10px;">
                 <input id="submit_upload_input" type="file" accept=".json" style="display:none" />
@@ -185,8 +201,13 @@
               </div>
               <div class="row" style="margin-top: 10px;">
                 <button data-action="submitRun">运行提交</button>
+                <button class="btn-secondary" data-action="submitStop">停止提交</button>
+                <button class="btn-outline" data-action="submitRuntime">运行态</button>
                 <button class="btn-secondary" data-action="submitStatus">查看状态</button>
                 <button class="btn-outline" data-action="submitBackfill">回填结果</button>
+              </div>
+              <div class="row" style="margin-top: 8px;">
+                <span class="muted" id="submit_runtime_label">运行态：idle</span>
               </div>
             </div>
           </section>

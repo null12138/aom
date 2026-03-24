@@ -358,6 +358,7 @@ def run_submitter_concurrent(
     db_path: Optional[Path] = None,
     start_index: int = 0,
     max_items: Optional[int] = None,
+    max_failed: Optional[int] = None,
     retry_failed: bool = False,
     stop_event: Optional[threading.Event] = None,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -418,6 +419,13 @@ def run_submitter_concurrent(
                     
                     count = await asyncio.to_thread(_sync_work)
                     processed += count
+                    if max_failed and len(state.get("failed", [])) >= max_failed:
+                        msg = f"失败熔断触发: failed={len(state.get('failed', []))} >= {max_failed}"
+                        logger.warning(msg)
+                        if on_progress:
+                            on_progress({"status": "FUSE", "expression": msg})
+                        if stop_event:
+                            stop_event.set()
                 except Exception as e:
                     logger.error(f"Batch execution error: {e}")
 
@@ -453,6 +461,7 @@ def run_submitter(
     db_path: Optional[Path] = None,
     start_index: int = 0,
     max_items: Optional[int] = None,
+    max_failed: Optional[int] = None,
     retry_failed: bool = False,
     stop_event: Optional[threading.Event] = None,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -471,6 +480,9 @@ def run_submitter(
     try:
         while queue:
             if stop_event and stop_event.is_set(): break
+            if max_failed and len(state.get("failed", [])) >= max_failed:
+                logger.warning("失败熔断触发: failed=%s >= %s", len(state.get("failed", [])), max_failed)
+                break
             item = queue.pop(0)
             _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
             processed += 1

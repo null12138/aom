@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,6 +69,36 @@ from .ai_api import (
 )
 
 DREAM_ALPHA_DAEMON = DreamAlphaDaemon()
+SUBMIT_RUNTIME_LOCK = threading.Lock()
+SUBMIT_STOP_EVENT = threading.Event()
+SUBMIT_RUNTIME: Dict[str, Any] = {
+    "running": False,
+    "stop_requested": False,
+    "started_at": "",
+    "finished_at": "",
+    "last_processed": 0,
+    "last_stats": {},
+    "last_error": "",
+    "current": {},
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _submit_runtime_snapshot() -> Dict[str, Any]:
+    with SUBMIT_RUNTIME_LOCK:
+        return {
+            "running": bool(SUBMIT_RUNTIME.get("running")),
+            "stop_requested": bool(SUBMIT_RUNTIME.get("stop_requested")),
+            "started_at": str(SUBMIT_RUNTIME.get("started_at") or ""),
+            "finished_at": str(SUBMIT_RUNTIME.get("finished_at") or ""),
+            "last_processed": int(SUBMIT_RUNTIME.get("last_processed") or 0),
+            "last_stats": dict(SUBMIT_RUNTIME.get("last_stats") or {}),
+            "last_error": str(SUBMIT_RUNTIME.get("last_error") or ""),
+            "current": dict(SUBMIT_RUNTIME.get("current") or {}),
+        }
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -113,6 +144,9 @@ class AOMHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             self._send_json({"ok": True})
+            return
+        if path == "/api/submit/runtime":
+            self._send_json({"ok": True, "data": _submit_runtime_snapshot()})
             return
         self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -314,67 +348,140 @@ class AOMHandler(BaseHTTPRequestHandler):
             return {"updated": True}
 
         if path == "/api/submit/run":
+            with SUBMIT_RUNTIME_LOCK:
+                if SUBMIT_RUNTIME.get("running"):
+                    raise ValueError("submitter already running, stop current task before starting another")
+                SUBMIT_RUNTIME["running"] = True
+                SUBMIT_RUNTIME["stop_requested"] = False
+                SUBMIT_RUNTIME["started_at"] = _utc_now_iso()
+                SUBMIT_RUNTIME["finished_at"] = ""
+                SUBMIT_RUNTIME["last_processed"] = 0
+                SUBMIT_RUNTIME["last_stats"] = {}
+                SUBMIT_RUNTIME["last_error"] = ""
+                SUBMIT_RUNTIME["current"] = {}
+
             state_path = resolve_path(payload.get("state")) if payload.get("state") else None
             db_path = resolve_path(payload.get("db") or "db/factor_library.db")
             mode = "brain"
-            max_items = payload.get("max")
-            concurrency = int(payload.get("concurrency", 1))
-            start_index = payload.get("start")
+            max_items_raw = payload.get("max")
+            start_index_raw = payload.get("start")
+            max_failed_raw = payload.get("max_failed")
+            try:
+                concurrency = max(1, min(8, int(payload.get("concurrency", 1))))
+            except (TypeError, ValueError):
+                concurrency = 1
+            try:
+                batch_size = max(1, min(10, int(payload.get("batch_size", 1))))
+            except (TypeError, ValueError):
+                batch_size = 1
+            try:
+                start_index = max(0, int(start_index_raw)) if start_index_raw is not None else 0
+            except (TypeError, ValueError):
+                start_index = 0
+            try:
+                max_items = max(0, int(max_items_raw)) if max_items_raw is not None else None
+            except (TypeError, ValueError):
+                max_items = None
+            if max_items == 0:
+                max_items = None
+            try:
+                max_failed = max(0, int(max_failed_raw)) if max_failed_raw is not None else None
+            except (TypeError, ValueError):
+                max_failed = None
+            if max_failed == 0:
+                max_failed = None
 
-            if state_path and state_path.exists():
-                state = submit_load_state(state_path)
-                if state.get("mode") == "stream":
-                    factors_path = payload.get("file")
-                    if not factors_path:
-                        raise ValueError("legacy stream state requires factors file for migration")
-                    factors = submit_load_factors(resolve_path(str(factors_path)))
+            SUBMIT_STOP_EVENT.clear()
+            with SUBMIT_RUNTIME_LOCK:
+                SUBMIT_RUNTIME["current"] = {
+                    "concurrency": concurrency,
+                    "batch_size": batch_size,
+                    "start": start_index,
+                    "max_items": max_items if max_items is not None else 0,
+                    "max_failed": max_failed if max_failed is not None else 0,
+                }
+
+            run_error = ""
+            state: Dict[str, Any]
+            processed = 0
+            try:
+                if state_path and state_path.exists():
+                    state = submit_load_state(state_path)
+                    if state.get("mode") == "stream":
+                        factors_path = payload.get("file")
+                        if not factors_path:
+                            raise ValueError("legacy stream state requires factors file for migration")
+                        factors = submit_load_factors(resolve_path(str(factors_path)))
+                        state = init_state(
+                            factors=factors,
+                            run_id=payload.get("run_id") or "web",
+                            config={"mode": mode},
+                            dedup=True,
+                        )
+                else:
+                    factors_path = resolve_path(payload["file"])
+                    factors = submit_load_factors(factors_path)
                     state = init_state(
                         factors=factors,
                         run_id=payload.get("run_id") or "web",
                         config={"mode": mode},
                         dedup=True,
                     )
-            else:
-                factors_path = resolve_path(payload["file"])
-                factors = submit_load_factors(factors_path)
-                state = init_state(
-                    factors=factors,
-                    run_id=payload.get("run_id") or "web",
-                    config={"mode": mode},
-                    dedup=True,
+
+                brain = load_brain_config()
+                adapter = BrainApiAdapter(
+                    username=brain["username"],
+                    password=brain["password"],
+                    api_base=brain["api_base"],
+                    max_wait=int(payload.get("max_wait", 1800)),
+                    use_proxy=_as_bool(brain.get("use_proxy"), False),
                 )
 
-            brain = load_brain_config()
-            adapter = BrainApiAdapter(
-                username=brain["username"],
-                password=brain["password"],
-                api_base=brain["api_base"],
-                max_wait=int(payload.get("max_wait", 1800)),
-                use_proxy=_as_bool(brain.get("use_proxy"), False),
-            )
-
-            if concurrency and concurrency > 1:
-                state, processed = run_submitter_concurrent(
-                    state=state,
-                    adapter=adapter,
-                    start_index=int(start_index) if start_index is not None else 0,
-                    max_items=int(max_items) if max_items else None,
-                    retry_failed=bool(payload.get("retry_failed")),
-                    concurrency=concurrency,
-                    db_path=db_path,
-                )
-            else:
-                state, processed = run_submitter(
-                    state=state,
-                    adapter=adapter,
-                    start_index=int(start_index) if start_index is not None else 0,
-                    max_items=int(max_items) if max_items else None,
-                    retry_failed=bool(payload.get("retry_failed")),
-                    db_path=db_path,
-                )
-            if state_path:
-                save_state(state_path, state)
-            return {"processed": processed, "stats": state.get("stats", {}), "state": str(state_path) if state_path else None}
+                if concurrency > 1 or batch_size > 1:
+                    state, processed = run_submitter_concurrent(
+                        state=state,
+                        adapter=adapter,
+                        start_index=start_index,
+                        max_items=max_items,
+                        max_failed=max_failed,
+                        retry_failed=bool(payload.get("retry_failed")),
+                        concurrency=concurrency,
+                        batch_size=batch_size,
+                        db_path=db_path,
+                        stop_event=SUBMIT_STOP_EVENT,
+                    )
+                else:
+                    state, processed = run_submitter(
+                        state=state,
+                        adapter=adapter,
+                        start_index=start_index,
+                        max_items=max_items,
+                        max_failed=max_failed,
+                        retry_failed=bool(payload.get("retry_failed")),
+                        db_path=db_path,
+                        stop_event=SUBMIT_STOP_EVENT,
+                    )
+                if state_path:
+                    save_state(state_path, state)
+                return {
+                    "processed": processed,
+                    "stats": state.get("stats", {}),
+                    "state": str(state_path) if state_path else None,
+                    "stopped": bool(SUBMIT_STOP_EVENT.is_set()),
+                }
+            except Exception as exc:
+                run_error = str(exc)
+                raise
+            finally:
+                with SUBMIT_RUNTIME_LOCK:
+                    SUBMIT_RUNTIME["running"] = False
+                    SUBMIT_RUNTIME["stop_requested"] = bool(SUBMIT_STOP_EVENT.is_set())
+                    SUBMIT_RUNTIME["finished_at"] = _utc_now_iso()
+                    SUBMIT_RUNTIME["last_processed"] = int(processed or 0)
+                    if isinstance(locals().get("state"), dict):
+                        SUBMIT_RUNTIME["last_stats"] = dict(locals()["state"].get("stats") or {})
+                    if run_error:
+                        SUBMIT_RUNTIME["last_error"] = run_error
 
         if path == "/api/submit/upload":
             name = payload.get("name") or "upload.json"
@@ -394,6 +501,16 @@ class AOMHandler(BaseHTTPRequestHandler):
         if path == "/api/submit/status":
             state = submit_load_state(resolve_path(payload.get("state") or "runs/submit_state_web.json"))
             return {"run_id": state.get("run_id"), "stats": state.get("stats", {})}
+
+        if path == "/api/submit/runtime":
+            return _submit_runtime_snapshot()
+
+        if path == "/api/submit/stop":
+            SUBMIT_STOP_EVENT.set()
+            with SUBMIT_RUNTIME_LOCK:
+                if SUBMIT_RUNTIME.get("running"):
+                    SUBMIT_RUNTIME["stop_requested"] = True
+            return {"stop_requested": True, "runtime": _submit_runtime_snapshot()}
 
         if path == "/api/submit/backfill":
             state_path = resolve_path(payload.get("state") or "runs/submit_state_web.json")

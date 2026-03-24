@@ -61,9 +61,15 @@ const ui = {
   submitFile: document.getElementById('submit_file'),
   submitMaxWait: document.getElementById('submit_max_wait'),
   submitConcurrency: document.getElementById('submit_concurrency'),
+  submitBatchSize: document.getElementById('submit_batch_size'),
+  submitStart: document.getElementById('submit_start'),
+  submitMaxItems: document.getElementById('submit_max_items'),
+  submitMaxFailed: document.getElementById('submit_max_failed'),
+  submitProfile: document.getElementById('submit_profile'),
   submitRetryFailed: document.getElementById('submit_retry_failed'),
   submitUploadInput: document.getElementById('submit_upload_input'),
   submitSourceLabel: document.getElementById('submit_source_label'),
+  submitRuntimeLabel: document.getElementById('submit_runtime_label'),
   libDb: document.getElementById('lib_db'),
   libDbAdv: document.getElementById('lib_db_adv'),
   libFile: document.getElementById('lib_file'),
@@ -198,6 +204,7 @@ let sortColumn = '';
 let sortOrder = 'asc';
 let autoSaveTimer = null;
 let dreamStatusPollTimer = null;
+let submitRuntimePollTimer = null;
 let currentDatasets = [];
 let selectedDatasets = new Set();
 const columnFilters = {
@@ -310,6 +317,20 @@ const setStatus = (text) => {
 };
 
 const FILE_SELECTION_KEY = 'aom_file_selection_v1';
+const SUBMIT_PREFS_KEY = 'aom_submit_prefs_v1';
+const SUBMIT_PROFILES = {
+  stable: { concurrency: 2, batchSize: 3, maxWait: 2400 },
+  balanced: { concurrency: 3, batchSize: 5, maxWait: 2100 },
+  turbo: { concurrency: 4, batchSize: 6, maxWait: 1800 },
+};
+
+const clampInt = (value, fallback, min, max) => {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const floor = Number.isFinite(min) ? min : parsed;
+  const ceil = Number.isFinite(max) ? max : parsed;
+  return Math.min(ceil, Math.max(floor, parsed));
+};
 
 const saveFileSelection = () => {
   const data = {
@@ -354,6 +375,109 @@ const loadFileSelection = () => {
   } catch (err) {
     // ignore
   }
+};
+
+const saveSubmitPrefs = () => {
+  const data = {
+    max_wait: ui.submitMaxWait && ui.submitMaxWait.value ? ui.submitMaxWait.value : '1800',
+    concurrency: ui.submitConcurrency && ui.submitConcurrency.value ? ui.submitConcurrency.value : '1',
+    batch_size: ui.submitBatchSize && ui.submitBatchSize.value ? ui.submitBatchSize.value : '4',
+    start: ui.submitStart && ui.submitStart.value ? ui.submitStart.value : '0',
+    max_items: ui.submitMaxItems && ui.submitMaxItems.value ? ui.submitMaxItems.value : '0',
+    max_failed: ui.submitMaxFailed && ui.submitMaxFailed.value ? ui.submitMaxFailed.value : '0',
+    retry_failed: !!(ui.submitRetryFailed && ui.submitRetryFailed.checked),
+    profile: ui.submitProfile && ui.submitProfile.value ? ui.submitProfile.value : 'balanced',
+  };
+  try {
+    localStorage.setItem(SUBMIT_PREFS_KEY, JSON.stringify(data));
+  } catch (err) {
+    // ignore
+  }
+};
+
+const loadSubmitPrefs = () => {
+  try {
+    const raw = localStorage.getItem(SUBMIT_PREFS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return;
+    if (ui.submitMaxWait && data.max_wait !== undefined) ui.submitMaxWait.value = String(data.max_wait);
+    if (ui.submitConcurrency && data.concurrency !== undefined) ui.submitConcurrency.value = String(data.concurrency);
+    if (ui.submitBatchSize && data.batch_size !== undefined) ui.submitBatchSize.value = String(data.batch_size);
+    if (ui.submitStart && data.start !== undefined) ui.submitStart.value = String(data.start);
+    if (ui.submitMaxItems && data.max_items !== undefined) ui.submitMaxItems.value = String(data.max_items);
+    if (ui.submitMaxFailed && data.max_failed !== undefined) ui.submitMaxFailed.value = String(data.max_failed);
+    if (ui.submitRetryFailed && data.retry_failed !== undefined) ui.submitRetryFailed.checked = !!data.retry_failed;
+    if (ui.submitProfile && data.profile) ui.submitProfile.value = String(data.profile);
+  } catch (err) {
+    // ignore
+  }
+};
+
+const applySubmitProfile = (profileName) => {
+  const profile = SUBMIT_PROFILES[profileName];
+  if (!profile) return false;
+  if (ui.submitConcurrency) ui.submitConcurrency.value = String(profile.concurrency);
+  if (ui.submitBatchSize) ui.submitBatchSize.value = String(profile.batchSize);
+  if (ui.submitMaxWait) ui.submitMaxWait.value = String(profile.maxWait);
+  if (ui.submitProfile) ui.submitProfile.value = profileName;
+  saveSubmitPrefs();
+  return true;
+};
+
+const renderSubmitRuntimeLabel = (runtime) => {
+  if (!ui.submitRuntimeLabel) return;
+  const rt = runtime && typeof runtime === 'object' ? runtime : {};
+  const running = !!rt.running;
+  const stopRequested = !!rt.stop_requested;
+  const current = rt.current && typeof rt.current === 'object' ? rt.current : {};
+  const c = current.concurrency || '-';
+  const b = current.batch_size || '-';
+  const started = rt.started_at || '-';
+  const processed = Number(rt.last_processed || 0);
+  const failed = Number((rt.last_stats && rt.last_stats.failed) || 0);
+  const finished = rt.finished_at || '-';
+  const status = running ? 'running' : 'idle';
+  const stopMark = stopRequested ? ' (stopping)' : '';
+  if (running) {
+    ui.submitRuntimeLabel.textContent = `运行态：${status}${stopMark} | 并发=${c} 批=${b} | started=${started} | processed=${processed} failed=${failed}`;
+  } else {
+    ui.submitRuntimeLabel.textContent = `运行态：${status} | last_finished=${finished} | processed=${processed} failed=${failed}`;
+  }
+};
+
+const stopSubmitRuntimePolling = () => {
+  if (submitRuntimePollTimer) {
+    clearInterval(submitRuntimePollTimer);
+    submitRuntimePollTimer = null;
+  }
+};
+
+const fetchSubmitRuntimeQuiet = async () => {
+  try {
+    const response = await fetch('/api/submit/runtime', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data || !data.ok) return null;
+    const runtime = data.data || {};
+    renderSubmitRuntimeLabel(runtime);
+    if (!runtime.running) {
+      stopSubmitRuntimePolling();
+    }
+    return runtime;
+  } catch (err) {
+    return null;
+  }
+};
+
+const startSubmitRuntimePolling = () => {
+  stopSubmitRuntimePolling();
+  submitRuntimePollTimer = setInterval(() => {
+    fetchSubmitRuntimeQuiet().catch(() => {});
+  }, 5000);
 };
 
 const setResult = (data) => {
@@ -2194,22 +2318,79 @@ const actions = {
     }
   },
   async submitStop() {
-    setResult('已发出停止指令');
+    setResult('正在发送停止指令...');
+    return apiPost('/api/submit/stop', {}).then((data) => {
+      const rt = data && data.data && data.data.runtime ? data.data.runtime : {};
+      renderSubmitRuntimeLabel(rt);
+      if (rt && rt.running) startSubmitRuntimePolling();
+      return data;
+    });
+  },
+  async submitRuntime() {
+    return apiPost('/api/submit/runtime', {}).then((data) => {
+      const rt = data && data.data ? data.data : {};
+      renderSubmitRuntimeLabel(rt);
+      if (rt && rt.running) startSubmitRuntimePolling();
+      return data;
+    });
+  },
+  submitApplyProfile() {
+    const profile = ui.submitProfile && ui.submitProfile.value ? ui.submitProfile.value : 'balanced';
+    if (profile === 'custom') {
+      setResult('已选择自定义档位，请手动调整并发/批大小/等待时间。');
+      return Promise.resolve();
+    }
+    const ok = applySubmitProfile(profile);
+    if (!ok) throw new Error(`未知预设: ${profile}`);
+    setResult(`已应用预设 ${profile}：并发=${ui.submitConcurrency.value}, 批大小=${ui.submitBatchSize.value}, 最大等待=${ui.submitMaxWait.value}s`);
     return Promise.resolve();
   },
   async submitRun() {
     const filePath = state.submitUploadPath || getFilePath('factors', ui.submitFile);
-    setResult(`🚀 任务已启动...\n并发: ${ui.submitConcurrency.value}\n模式: 全量并发`);
-    return apiPost('/api/submit/run', {
+    const concurrency = clampInt(ui.submitConcurrency && ui.submitConcurrency.value, 1, 1, 8);
+    const batchSize = clampInt(ui.submitBatchSize && ui.submitBatchSize.value, 4, 1, 10);
+    const maxWait = clampInt(ui.submitMaxWait && ui.submitMaxWait.value, 1800, 60, 7200);
+    const start = clampInt(ui.submitStart && ui.submitStart.value, 0, 0, 10000000);
+    const maxItems = clampInt(ui.submitMaxItems && ui.submitMaxItems.value, 0, 0, 10000000);
+    const maxFailed = clampInt(ui.submitMaxFailed && ui.submitMaxFailed.value, 0, 0, 1000000);
+    const statePath = getFilePath('state', ui.fileState);
+    const modeText = concurrency > 1 ? '并发批量' : (batchSize > 1 ? '单工批量' : '单条提交');
+    if (!filePath) throw new Error('请先选择或上传因子文件');
+
+    if (ui.submitConcurrency) ui.submitConcurrency.value = String(concurrency);
+    if (ui.submitBatchSize) ui.submitBatchSize.value = String(batchSize);
+    if (ui.submitMaxWait) ui.submitMaxWait.value = String(maxWait);
+    if (ui.submitStart) ui.submitStart.value = String(start);
+    if (ui.submitMaxItems) ui.submitMaxItems.value = String(maxItems);
+    if (ui.submitMaxFailed) ui.submitMaxFailed.value = String(maxFailed);
+    saveSubmitPrefs();
+
+    setResult(`🚀 任务已启动...\n模式: ${modeText}\n并发: ${concurrency}\n批大小: ${batchSize}\n起始偏移: ${start}\n最大提交: ${maxItems > 0 ? maxItems : '全部'}\n失败熔断: ${maxFailed > 0 ? maxFailed : '关闭'}`);
+
+    const payload = {
       file: filePath,
       db: getFilePath('factor_library', ui.libDb),
-      max_wait: ui.submitMaxWait.value ? Number(ui.submitMaxWait.value) : 1800,
-      concurrency: ui.submitConcurrency.value ? Number(ui.submitConcurrency.value) : 1,
+      max_wait: maxWait,
+      concurrency,
+      batch_size: batchSize,
+      start,
       retry_failed: ui.submitRetryFailed.checked,
-    }).then(data => {
-      setResult(data);
-      return data;
-    });
+    };
+    if (maxItems > 0) payload.max = maxItems;
+    if (maxFailed > 0) payload.max_failed = maxFailed;
+    if (statePath) payload.state = statePath;
+    startSubmitRuntimePolling();
+
+    return apiPost('/api/submit/run', payload)
+      .then(data => {
+        const rt = data && data.data && data.data.runtime ? data.data.runtime : null;
+        if (rt) renderSubmitRuntimeLabel(rt);
+        setResult(data);
+        return data;
+      })
+      .finally(() => {
+        fetchSubmitRuntimeQuiet().catch(() => {});
+      });
   },
   async submitStatus() {
     return apiPost('/api/library/stats', { db: getFilePath('factor_library', ui.libDb) });
@@ -2410,6 +2591,7 @@ try {
   loadDatasetSelectionCache();
   loadDatasetListCache();
   loadFileSelection();
+  loadSubmitPrefs();
   syncStateFromInputs();
   setResult('等待操作...');
   setupDataFieldsModal();
@@ -2420,11 +2602,43 @@ try {
       updateActiveLabels();
       actions.loadTemplate().catch(() => {});
       actions.dreamStatus().catch(() => {});
+      fetchSubmitRuntimeQuiet().then((rt) => {
+        if (rt && rt.running) startSubmitRuntimePolling();
+      }).catch(() => {});
       return actions.libraryRefresh().catch(() => {});
     })
     .catch(() => {});
 } catch (e) {
   console.error('Initialization error:', e);
+}
+
+const submitPrefInputs = [
+  ui.submitMaxWait,
+  ui.submitConcurrency,
+  ui.submitBatchSize,
+  ui.submitStart,
+  ui.submitMaxItems,
+  ui.submitMaxFailed,
+  ui.submitRetryFailed,
+];
+submitPrefInputs.forEach((el) => {
+  if (!el) return;
+  el.addEventListener('change', () => {
+    if (ui.submitProfile && ui.submitProfile.value !== 'custom') {
+      ui.submitProfile.value = 'custom';
+    }
+    saveSubmitPrefs();
+  });
+});
+if (ui.submitProfile) {
+  ui.submitProfile.addEventListener('change', () => {
+    const profile = ui.submitProfile.value;
+    if (profile && profile !== 'custom') {
+      applySubmitProfile(profile);
+    } else {
+      saveSubmitPrefs();
+    }
+  });
 }
 
 if (ui.fileTemplate) {
