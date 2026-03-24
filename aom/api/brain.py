@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 import threading
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
+from requests.adapters import HTTPAdapter
 
 DEFAULT_API_BASE = "https://api.worldquantbrain.com"
 logger = logging.getLogger("BrainClient")
@@ -52,13 +54,56 @@ class BrainClient:
         self.username = username
         self.password = password
         self.api_base = api_base or DEFAULT_API_BASE
-        self.session = requests.Session()
         self.use_proxy = _as_bool(use_proxy, False)
-        # Default: do not read HTTP(S)_PROXY/ALL_PROXY from environment.
-        self.session.trust_env = self.use_proxy
+        self.session = self._new_session()
         self.timeout = timeout
         self.poll_timeout = self._normalize_poll_timeout(poll_timeout)
-        self._login_lock = threading.Lock()
+        self._login_lock = threading.RLock()
+        self._last_session_reset_ts = 0.0
+        self._session_reset_cooldown_sec = 45.0
+
+    def _new_session(self) -> requests.Session:
+        session = requests.Session()
+        # Default: do not read HTTP(S)_PROXY/ALL_PROXY from environment.
+        session.trust_env = self.use_proxy
+        # Keep a reasonably sized connection pool for concurrent polling/fetching.
+        adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers.update({"Accept": "application/json"})
+        return session
+
+    def _login_with_current_session(self) -> None:
+        resp = self.session.post(
+            f"{self.api_base}/authentication",
+            auth=(self.username, self.password),
+            timeout=self.timeout,
+        )
+        if resp.status_code == 201:
+            return
+        if resp.status_code == 401 and resp.headers.get("WWW-Authenticate") == "persona":
+            raise BrainAuthError("persona authentication required", status_code=401)
+        raise BrainAuthError(
+            f"authentication failed: {resp.status_code} {resp.text}",
+            status_code=resp.status_code,
+        )
+
+    def _reset_session(self, relogin: bool = False, reason: str = "") -> None:
+        with self._login_lock:
+            now = time.time()
+            if (now - self._last_session_reset_ts) < self._session_reset_cooldown_sec:
+                return
+            old_session = self.session
+            self.session = self._new_session()
+            self._last_session_reset_ts = now
+            try:
+                old_session.close()
+            except Exception:
+                pass
+            if reason:
+                logger.info("HTTP session reset: %s", reason)
+            if relogin:
+                self._login_with_current_session()
 
     def _normalize_poll_timeout(self, raw_timeout: Optional[Any]) -> Any:
         if raw_timeout is None:
@@ -77,16 +122,41 @@ class BrainClient:
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         if "timeout" not in kwargs:
             kwargs["timeout"] = self.timeout
-            
-        resp = self.session.request(method, url, **kwargs)
         
-        # If 401, try to re-login once (avoid recursion during login)
-        if resp.status_code == 401 and "/authentication" not in url:
-            logger.info("Session expired (401), re-authenticating...")
-            self.login()
-            resp = self.session.request(method, url, **kwargs)
-            
-        return resp
+        method_upper = str(method or "GET").upper()
+        # GET/HEAD/OPTIONS are idempotent; allow transparent network retries.
+        max_network_attempts = 3 if method_upper in {"GET", "HEAD", "OPTIONS"} else 1
+        for attempt in range(1, max_network_attempts + 1):
+            try:
+                resp = self.session.request(method, url, **kwargs)
+            except requests.RequestException:
+                if attempt >= max_network_attempts:
+                    raise
+                wait_s = min(5.0, float(2 ** (attempt - 1))) + random.uniform(0.0, 0.6)
+                logger.info(
+                    "Request network retry (method=%s, attempt=%s/%s, wait=%.1fs, url=%s)",
+                    method_upper,
+                    attempt + 1,
+                    max_network_attempts,
+                    wait_s,
+                    url,
+                )
+                if attempt >= 2:
+                    try:
+                        self._reset_session(relogin=True, reason=f"request-retry method={method_upper}")
+                    except Exception as relogin_exc:
+                        logger.warning("Session reset during request retry failed: %s", relogin_exc)
+                time.sleep(wait_s)
+                continue
+
+            # If 401, try to re-login once (avoid recursion during login)
+            if resp.status_code == 401 and "/authentication" not in url:
+                logger.info("Session expired (401), re-authenticating...")
+                self.login()
+                resp = self.session.request(method, url, **kwargs)
+            return resp
+
+        raise BrainApiError(f"request failed without response: method={method_upper} url={url}")
 
     @staticmethod
     def _simulation_id_from_location(location: str) -> str:
@@ -99,11 +169,7 @@ class BrainClient:
 
     def login(self) -> None:
         with self._login_lock:
-            resp = self.session.post(f"{self.api_base}/authentication", auth=(self.username, self.password), timeout=self.timeout)
-            if resp.status_code == 201: return
-            if resp.status_code == 401 and resp.headers.get("WWW-Authenticate") == "persona":
-                raise BrainAuthError("persona authentication required", status_code=401)
-            raise BrainAuthError(f"authentication failed: {resp.status_code} {resp.text}", status_code=resp.status_code)
+            self._login_with_current_session()
 
     @staticmethod
     def _retry_after_seconds(resp: requests.Response, default_wait: int) -> int:
@@ -176,13 +242,15 @@ class BrainClient:
         
         retry_count = 0
         network_error_streak = 0
+        network_grace = 0
         last_network_warn_ts = 0.0
         while True:
             if stop_event and stop_event.is_set():
                 raise BrainApiError("任务已被用户手动中断")
             
             elapsed = int(time.time() - start)
-            if elapsed > max_wait:
+            effective_max_wait = int(max_wait) + min(600, int(network_grace))
+            if elapsed > effective_max_wait:
                 status_text = "UNKNOWN"
                 detail_msg = ""
                 try:
@@ -196,7 +264,9 @@ class BrainClient:
                 extra = f"simulation_id={simulation_id or '-'} status={status_text}"
                 if detail_msg:
                     extra += f" message={detail_msg}"
-                raise BrainApiError(f"仿真超时 ({max_wait}s) | {extra}")
+                raise BrainApiError(
+                    f"仿真超时 ({max_wait}s + network_grace={min(600, int(network_grace))}s) | {extra}"
+                )
 
             try:
                 resp = self._request("GET", url, timeout=self.poll_timeout)
@@ -227,6 +297,7 @@ class BrainClient:
             except requests.RequestException as e:
                 network_error_streak += 1
                 wait_sec = min(30, 2 ** min(network_error_streak, 5))
+                network_grace = min(600, network_grace + wait_sec)
                 now_ts = time.time()
                 should_warn = (
                     network_error_streak in {1, 3, 5, 8}
@@ -248,6 +319,24 @@ class BrainClient:
                         network_error_streak,
                         wait_sec,
                     )
+                if network_error_streak in {3, 6, 10}:
+                    try:
+                        self._reset_session(
+                            relogin=True,
+                            reason=f"polling network-error streak={network_error_streak}",
+                        )
+                        logger.warning(
+                            "Polling auto-reconnect succeeded (simulation_id=%s, streak=%d)",
+                            simulation_id or "-",
+                            network_error_streak,
+                        )
+                    except Exception as relogin_exc:
+                        logger.warning(
+                            "Polling auto-reconnect failed (simulation_id=%s, streak=%d): %s",
+                            simulation_id or "-",
+                            network_error_streak,
+                            relogin_exc,
+                        )
                 if on_heartbeat:
                     on_heartbeat(elapsed)
                 for _ in range(wait_sec):

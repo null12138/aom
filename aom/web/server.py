@@ -32,10 +32,8 @@ from ..modules.submitter.engine import (
     BrainBackfillAdapter,
     backfill_state,
     init_state,
-    init_state_stream,
     load_factors as submit_load_factors,
     load_state as submit_load_state,
-    run_submitter_stream,
     run_submitter,
     run_submitter_concurrent,
     save_state,
@@ -321,31 +319,30 @@ class AOMHandler(BaseHTTPRequestHandler):
             mode = "brain"
             max_items = payload.get("max")
             concurrency = int(payload.get("concurrency", 1))
-            ordered = bool(payload.get("ordered", False))
             start_index = payload.get("start")
 
             if state_path and state_path.exists():
                 state = submit_load_state(state_path)
                 if state.get("mode") == "stream":
-                    ordered = True
-            else:
-                factors_path = resolve_path(payload["file"])
-                if ordered:
-                    state = init_state_stream(
-                        source_file=factors_path,
-                        run_id=payload.get("run_id") or "web",
-                        config={"mode": mode},
-                        start_index=int(start_index) if start_index is not None else 0,
-                        dedup=True,
-                    )
-                else:
-                    factors = submit_load_factors(factors_path)
+                    factors_path = payload.get("file")
+                    if not factors_path:
+                        raise ValueError("legacy stream state requires factors file for migration")
+                    factors = submit_load_factors(resolve_path(str(factors_path)))
                     state = init_state(
                         factors=factors,
                         run_id=payload.get("run_id") or "web",
                         config={"mode": mode},
                         dedup=True,
                     )
+            else:
+                factors_path = resolve_path(payload["file"])
+                factors = submit_load_factors(factors_path)
+                state = init_state(
+                    factors=factors,
+                    run_id=payload.get("run_id") or "web",
+                    config={"mode": mode},
+                    dedup=True,
+                )
 
             brain = load_brain_config()
             adapter = BrainApiAdapter(
@@ -356,22 +353,7 @@ class AOMHandler(BaseHTTPRequestHandler):
                 use_proxy=_as_bool(brain.get("use_proxy"), False),
             )
 
-            if ordered:
-                if concurrency and concurrency > 1:
-                    concurrency = 1
-                source_file = payload.get("file") or state.get("config", {}).get("source_file")
-                if not source_file:
-                    raise ValueError("ordered mode requires factors file")
-                state, processed = run_submitter_stream(
-                    state=state,
-                    adapter=adapter,
-                    source_file=resolve_path(str(source_file)),
-                    max_items=int(max_items) if max_items else None,
-                    retry_failed=bool(payload.get("retry_failed")),
-                    start_index=int(start_index) if start_index is not None else None,
-                    db_path=db_path,
-                )
-            elif concurrency and concurrency > 1:
+            if concurrency and concurrency > 1:
                 state, processed = run_submitter_concurrent(
                     state=state,
                     adapter=adapter,

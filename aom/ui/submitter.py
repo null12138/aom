@@ -19,11 +19,8 @@ from ..modules.submitter.engine import (
     SubmitterError,
     backfill_state,
     init_state,
-    init_state_stream,
     load_factors,
-    run_submitter,
-    run_submitter_multiple,
-    run_submitter_stream,
+    run_submitter_concurrent,
 )
 from ..modules.library.engine import connect as lib_connect, load_fingerprints as lib_load_fingerprints
 from ..api.brain import BrainClient
@@ -65,7 +62,6 @@ class SubmitterPane(Vertical):
             )
             yield Horizontal(
                 Label("最大等待", classes="field-label"), Input("1800", id="max_wait"),
-                Checkbox("顺序模式", id="ordered", value=True), # 补齐缺失的 id="ordered"
                 classes="field-row"
             )
             yield Horizontal(
@@ -201,7 +197,6 @@ class SubmitterPane(Vertical):
                 "db_path_raw": self.query_one("#db_path", Input).value,
                 "start_idx": int(self.query_one("#start_index", Input).value or 0),
                 "concurrency": int(self.query_one("#concurrency", Input).value or 1),
-                "ordered": self.query_one("#ordered", Checkbox).value,
                 "use_multiple": self.query_one("#use_multiple", Checkbox).value,
                 "batch_size": int(self.query_one("#batch_size", Input).value or 10),
                 "max_wait": int(self.query_one("#max_wait", Input).value or 1800),
@@ -230,17 +225,25 @@ class SubmitterPane(Vertical):
             factors_path = params["factors_path"]; db_path = ROOT_DIR / params["db_path_raw"]
             brain_cfg = self._load_brain_config()
             adapter = BrainApiAdapter(max_wait=params["max_wait"], settings_override=params["overrides"], **brain_cfg)
-
-            # Use the unified concurrent engine which handles both concurrency and multiple (batch_size)
-            state = init_state_stream(factors_path, run_id=datetime.now().strftime("%H%M%S"), config={"mode":"brain"}, start_index=params["start_idx"])
-
-            from ..modules.submitter.engine import run_submitter_concurrent
+            factors = load_factors(factors_path)
+            existing = None
+            if db_path.exists():
+                conn = lib_connect(db_path)
+                existing = lib_load_fingerprints(conn)
+                conn.close()
+            state = init_state(
+                factors=factors,
+                run_id=datetime.now().strftime("%H%M%S"),
+                config={"mode": "brain"},
+                dedup=True,
+                existing_fingerprints=existing,
+            )
             state, proc = run_submitter_concurrent(
                 state, 
                 adapter, 
                 concurrency=params["concurrency"], 
                 batch_size=params["batch_size"] if params["use_multiple"] else 1,
-                source_file=factors_path, 
+                start_index=params["start_idx"],
                 db_path=db_path, 
                 on_progress=self._on_item_progress, 
                 stop_event=self.stop_event

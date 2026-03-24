@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Callable
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 import logging
 
 from ...core.fingerprint import factor_fingerprint
@@ -145,19 +145,6 @@ def load_factors(path: Path) -> List[Dict[str, Any]]:
     if not isinstance(data, list): raise SubmitterError("Invalid factors file format")
     return data
 
-def iter_factors(path: Path, start_index: int = 0) -> Iterator[Tuple[int, Dict[str, Any]]]:
-    with path.open("r", encoding="utf-8") as f: 
-        data = json.load(f)
-    if isinstance(data, dict) and data.get("type") == "bundle":
-        common = data.get("common_settings", {})
-        for idx, f in enumerate(data.get("factors", [])):
-            if idx < start_index: continue
-            yield idx, {"factor_id": f.get("id"), "expression": f.get("expr"), "settings": common, "tags": f.get("tags", []), "priority": f.get("priority", 100)}
-    else:
-        for idx, item in enumerate(data):
-            if idx < start_index: continue
-            yield idx, item
-
 def init_state(factors: List[Dict[str, Any]], run_id: str, config: Dict[str, Any], dedup: bool = True, existing_fingerprints: Optional[set[str]] = None) -> Dict[str, Any]:
     queue = []
     skipped = 0
@@ -172,9 +159,6 @@ def init_state(factors: List[Dict[str, Any]], run_id: str, config: Dict[str, Any
         item["status"] = "queued"
         queue.append(item)
     return {"run_id": run_id, "schema_version": STATE_VERSION, "created_at": _now(), "config": config, "queue": queue, "in_flight": [], "completed": [], "failed": [], "stats": {"skipped_duplicates": skipped}}
-
-def init_state_stream(source_file: Path, run_id: str, config: Dict[str, Any], start_index: int = 0, dedup: bool = True) -> Dict[str, Any]:
-    return {"run_id": run_id, "schema_version": STATE_VERSION, "created_at": _now(), "config": config, "mode": "stream", "cursor": start_index, "in_flight": [], "completed": [], "failed": [], "stats": {"skipped_duplicates": 0}}
 
 def save_state(path: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -321,7 +305,6 @@ def run_submitter_concurrent(
     concurrency: int = 2,
     batch_size: int = 3,
     db_path: Optional[Path] = None,
-    source_file: Optional[Path] = None,
     start_index: int = 0,
     max_items: Optional[int] = None,
     retry_failed: bool = False,
@@ -346,20 +329,13 @@ def run_submitter_concurrent(
     except (TypeError, ValueError):
         normalized_start = 0
 
-    if state.get("mode") == "stream" and source_file:
-        factors_iter = iter_factors(source_file, start_index=state.get("cursor", 0))
-    else:
-        pending_queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
-        if normalized_start > 0:
-            pending_queue = pending_queue[normalized_start:]
-            state["queue"] = pending_queue
-        def _q_iter():
-            for i, it in enumerate(list(pending_queue)):
-                yield i, it
-        factors_iter = _q_iter()
+    pending_queue = _prepare_queue_for_resume(state, retry_failed=retry_failed)
+    if normalized_start > 0:
+        pending_queue = pending_queue[normalized_start:]
+        state["queue"] = pending_queue
 
     all_factors = []
-    for idx, item in factors_iter:
+    for idx, item in enumerate(list(pending_queue)):
         all_factors.append((idx, item))
         if max_items and max_items > 0 and len(all_factors) >= max_items:
             break
@@ -391,11 +367,6 @@ def run_submitter_concurrent(
                     
                     count = await asyncio.to_thread(_sync_work)
                     processed += count
-                    
-                    with _state_lock:
-                        if state.get("mode") == "stream":
-                            last_idx = batch_items_with_idx[-1][0]
-                            state["cursor"] = max(state.get("cursor", 0), last_idx + 1)
                 except Exception as e:
                     logger.error(f"Batch execution error: {e}")
 
@@ -449,53 +420,8 @@ def run_submitter(
     _update_stats(state)
     return state, processed
 
-def run_submitter_stream(
-    state: Dict[str, Any],
-    adapter: SubmissionAdapter,
-    source_file: Path,
-    start_index: int = 0,
-    db_path: Optional[Path] = None,
-    max_items: Optional[int] = None,
-    retry_failed: bool = False,
-    stop_event: Optional[threading.Event] = None,
-    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
-) -> Tuple[Dict[str, Any], int]:
-    processed = 0
-    try:
-        normalized_start = int(start_index or 0)
-    except (TypeError, ValueError):
-        normalized_start = 0
-    lib_conn = lib_connect(db_path) if db_path else None
-    if lib_conn: lib_init_db(lib_conn)
-    try:
-        if retry_failed:
-            retry_queue = _prepare_queue_for_resume(state, retry_failed=True)
-            while retry_queue:
-                if stop_event and stop_event.is_set():
-                    break
-                item = retry_queue.pop(0)
-                _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
-                processed += 1
-                if max_items and processed >= max_items:
-                    break
-
-        if max_items and processed >= max_items:
-            _update_stats(state)
-            return state, processed
-
-        for idx, item in iter_factors(source_file, start_index=normalized_start):
-            if stop_event and stop_event.is_set(): break
-            _process_single_item(item, adapter, state, lib_conn, on_progress, stop_event)
-            state["cursor"] = idx + 1
-            processed += 1
-            if max_items and processed >= max_items: break
-    finally:
-        if lib_conn: lib_conn.close()
-    _update_stats(state)
-    return state, processed
-
-def run_submitter_multiple(state: Dict[str, Any], adapter: SubmissionAdapter, source_file: Optional[Path] = None, batch_size: int = 10, db_path: Optional[Path] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None, stop_event: Optional[threading.Event] = None) -> Tuple[Dict[str, Any], int]:
-    return run_submitter_concurrent(state, adapter, concurrency=1, batch_size=batch_size, db_path=db_path, source_file=source_file, stop_event=stop_event, on_progress=on_progress)
+def run_submitter_multiple(state: Dict[str, Any], adapter: SubmissionAdapter, batch_size: int = 10, db_path: Optional[Path] = None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None, stop_event: Optional[threading.Event] = None) -> Tuple[Dict[str, Any], int]:
+    return run_submitter_concurrent(state, adapter, concurrency=1, batch_size=batch_size, db_path=db_path, stop_event=stop_event, on_progress=on_progress)
 
 # --- Adapter Implementations ---
 
@@ -528,6 +454,8 @@ class BrainApiAdapter(SubmissionAdapter):
     def submit_multiple(self, items, stop_event=None, on_heartbeat=None):
         self.ensure_login()
         if not items: return []
+        if len(items) == 1:
+            return [self.submit(items[0], stop_event=stop_event, on_heartbeat=on_heartbeat)]
         payloads = [build_brain_payload(it, self.settings_override) for it in items]
         try:
             outcomes = self.client.simulate_multiple(payloads, max_wait=self.max_wait, stop_event=stop_event, on_heartbeat=on_heartbeat)

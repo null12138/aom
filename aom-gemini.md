@@ -22,7 +22,7 @@ AOM 是专为 WorldQuant Brain 平台设计的一站式工作流工具，旨在�
 - **配置优化**: 开启了 `check_same_thread=False` 和 `timeout=30.0`，彻底解决了 `database is locked` 和 `SQLite objects created in a thread can only be used in that same thread` 的报错。
 
 ### 2.3 状态管理
-- **流式处理**: 针对超大因子文件（>2MB），系统会自动切换为 `ordered stream` 模式，避免一次性加载导致的内存溢出。
+- **队列并发处理**: 统一使用队列并发模型提交回测，避免顺序流式模式导致的吞吐受限。
 - **状态回传**: 增加了对 `CANCELLED` 状态的识别，并在 CLI/TUI 中实时回传 Brain 官网的模拟详情直达链接。
 
 ---

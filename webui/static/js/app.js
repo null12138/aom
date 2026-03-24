@@ -61,7 +61,6 @@ const ui = {
   submitFile: document.getElementById('submit_file'),
   submitMaxWait: document.getElementById('submit_max_wait'),
   submitConcurrency: document.getElementById('submit_concurrency'),
-  submitOrdered: document.getElementById('submit_ordered'),
   submitRetryFailed: document.getElementById('submit_retry_failed'),
   submitUploadInput: document.getElementById('submit_upload_input'),
   submitSourceLabel: document.getElementById('submit_source_label'),
@@ -2200,13 +2199,12 @@ const actions = {
   },
   async submitRun() {
     const filePath = state.submitUploadPath || getFilePath('factors', ui.submitFile);
-    setResult(`🚀 任务已启动...\n并发: ${ui.submitConcurrency.value}\n模式: ${ui.submitOrdered.checked ? '流式' : '全量'}`);
+    setResult(`🚀 任务已启动...\n并发: ${ui.submitConcurrency.value}\n模式: 全量并发`);
     return apiPost('/api/submit/run', {
       file: filePath,
       db: getFilePath('factor_library', ui.libDb),
       max_wait: ui.submitMaxWait.value ? Number(ui.submitMaxWait.value) : 1800,
       concurrency: ui.submitConcurrency.value ? Number(ui.submitConcurrency.value) : 1,
-      ordered: ui.submitOrdered.checked,
       retry_failed: ui.submitRetryFailed.checked,
     }).then(data => {
       setResult(data);

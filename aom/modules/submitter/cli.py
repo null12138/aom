@@ -16,12 +16,10 @@ from .engine import (
     SubmitterError,
     backfill_state,
     init_state,
-    init_state_stream,
     load_factors,
     load_state,
     run_submitter_concurrent,
     run_submitter,
-    run_submitter_stream,
     save_state,
 )
 
@@ -36,8 +34,6 @@ def add_submit_subparser(subparsers: argparse._SubParsersAction) -> None:
     init_parser.add_argument("--run-id", default="", help="run id")
     init_parser.add_argument("--no-dedup", action="store_true", help="disable dedup")
     init_parser.add_argument("--library", default="", help="library db path for dedup")
-    init_parser.add_argument("--ordered", action="store_true", help="create ordered stream state")
-    init_parser.add_argument("--start", type=int, default=0, help="start index for ordered mode")
 
     run_parser = submit_sub.add_parser("run", help="run submitter")
     run_parser.add_argument("--file", default="", help="factors JSON file (for new run, optional in interactive wizard)")
@@ -46,9 +42,7 @@ def add_submit_subparser(subparsers: argparse._SubParsersAction) -> None:
     run_parser.add_argument("--max-wait", type=int, default=1800, help="max wait seconds for brain mode")
     run_parser.add_argument("--concurrency", type=int, default=1, help="concurrent workers (1-8)")
     run_parser.add_argument("--batch-size", type=int, default=1, help="batch size for multiple mode (1-10)")
-    run_parser.add_argument("--ordered", action="store_true", help="ordered sequential by index")
-    run_parser.add_argument("--start", type=int, default=-1, help="start index (ordered: absolute index, queue/concurrent: skip first N pending)")
-    run_parser.add_argument("--legacy-queue", action="store_true", help="use legacy queue mode")
+    run_parser.add_argument("--start", type=int, default=0, help="skip first N pending items")
     run_parser.add_argument("--retry-failed", action="store_true", help="retry failed items marked retryable")
     run_parser.add_argument("--library", default="db/factor_library.db", help="library db path for persistence/dedup")
     run_parser.add_argument("--interactive", action="store_true", help="interactive numeric picker for settings overrides")
@@ -82,36 +76,27 @@ def handle_submit_command(args: argparse.Namespace) -> int:
 
 def submit_init(args: argparse.Namespace) -> int:
     run_id = args.run_id or _new_run_id()
-    if args.ordered:
-        state = init_state_stream(
-            source_file=Path(args.file),
-            run_id=run_id,
-            config=_default_config(),
-            start_index=args.start,
-            dedup=not args.no_dedup,
-        )
-    else:
-        factors_path = Path(args.file)
-        try:
-            factors = load_factors(factors_path)
-        except SubmitterError as exc:
-            print(str(exc))
-            return 1
+    factors_path = Path(args.file)
+    try:
+        factors = load_factors(factors_path)
+    except SubmitterError as exc:
+        print(str(exc))
+        return 1
 
-        existing = None
-        if args.library:
-            conn = lib_connect(Path(args.library))
-            lib_init_db(conn)
-            existing = load_fingerprints(conn)
-            conn.close()
+    existing = None
+    if args.library:
+        conn = lib_connect(Path(args.library))
+        lib_init_db(conn)
+        existing = lib_load_fingerprints(conn)
+        conn.close()
 
-        state = init_state(
-            factors=factors,
-            run_id=run_id,
-            config=_default_config(),
-            dedup=not args.no_dedup,
-            existing_fingerprints=existing,
-        )
+    state = init_state(
+        factors=factors,
+        run_id=run_id,
+        config=_default_config(),
+        dedup=not args.no_dedup,
+        existing_fingerprints=existing,
+    )
 
     save_state(Path(args.state), state)
     print(f"state created: {args.state}")
@@ -127,7 +112,6 @@ def submit_run(args: argparse.Namespace) -> int:
         return 130
 
     state_path = Path(args.state) if args.state else None
-    ordered = bool(args.ordered) and not args.legacy_queue
     library_path = Path(args.library) if args.library else None
 
     overrides = {}
@@ -148,27 +132,12 @@ def submit_run(args: argparse.Namespace) -> int:
         except SubmitterError as exc:
             print(str(exc))
             return 1
+        # Migrate legacy stream state by rebuilding queue state from factors file.
         if state.get("mode") == "stream":
-            if not ordered:
-                print("state mode=stream detected; forcing ordered mode (sequential). --batch-size/--concurrency are ignored.")
-            ordered = True
-    else:
-        if not args.file:
-            print("--file is required when state does not exist")
-            return 1
-        if not args.legacy_queue and _should_stream(Path(args.file)):
-            ordered = True
-            print("auto: large file detected, using ordered stream mode (sequential). --batch-size/--concurrency are ignored.")
-        run_id = args.run_id or _new_run_id()
-        if ordered:
-            state = init_state_stream(
-                source_file=Path(args.file),
-                run_id=run_id,
-                config=_default_config(),
-                start_index=args.start if args.start >= 0 else 0,
-                dedup=True,
-            )
-        else:
+            if not args.file:
+                print("legacy stream state detected; please provide --file to rebuild queue state")
+                return 1
+            print("legacy stream state detected; rebuilding as queue state.")
             try:
                 factors = load_factors(Path(args.file))
             except SubmitterError as exc:
@@ -181,11 +150,33 @@ def submit_run(args: argparse.Namespace) -> int:
                 conn.close()
             state = init_state(
                 factors=factors,
-                run_id=run_id,
+                run_id=args.run_id or _new_run_id(),
                 config=_default_config(),
                 dedup=True,
                 existing_fingerprints=existing,
             )
+    else:
+        if not args.file:
+            print("--file is required when state does not exist")
+            return 1
+        run_id = args.run_id or _new_run_id()
+        try:
+            factors = load_factors(Path(args.file))
+        except SubmitterError as exc:
+            print(str(exc))
+            return 1
+        existing = None
+        if library_path and library_path.exists():
+            conn = lib_connect(library_path)
+            existing = lib_load_fingerprints(conn)
+            conn.close()
+        state = init_state(
+            factors=factors,
+            run_id=run_id,
+            config=_default_config(),
+            dedup=True,
+            existing_fingerprints=existing,
+        )
 
     try:
         brain_cfg = _load_brain_config()
@@ -202,28 +193,10 @@ def submit_run(args: argparse.Namespace) -> int:
         return 1
     
     db_to_pass = library_path if library_path else None
-    queue_start = args.start if args.start >= 0 else 0
+    queue_start = max(0, int(args.start or 0))
 
     try:
-        if ordered:
-            print("run mode: ordered stream (sequential submit)")
-            source_file = args.file or str(state.get("config", {}).get("source_file") or "")
-            if not source_file:
-                print("--file is required for ordered mode")
-                return 1
-            if args.start >= 0:
-                start_index = args.start
-            else:
-                start_index = int(state.get("cursor", 0) or 0)
-            state, processed = run_submitter_stream(
-                state=state,
-                adapter=adapter,
-                source_file=Path(source_file),
-                start_index=start_index,
-                retry_failed=bool(args.retry_failed),
-                db_path=db_to_pass,
-            )
-        elif (args.concurrency and args.concurrency > 1) or (args.batch_size and args.batch_size > 1):
+        if (args.concurrency and args.concurrency > 1) or (args.batch_size and args.batch_size > 1):
             print(f"run mode: concurrent multiple (concurrency={args.concurrency}, batch_size={args.batch_size})")
             if queue_start > 0:
                 print(f"queue start offset: {queue_start}")
@@ -235,7 +208,6 @@ def submit_run(args: argparse.Namespace) -> int:
                 start_index=queue_start,
                 retry_failed=bool(args.retry_failed),
                 db_path=db_to_pass,
-                source_file=Path(args.file) if args.file else None,
             )
         else:
             print("run mode: single submit")
@@ -258,11 +230,7 @@ def submit_run(args: argparse.Namespace) -> int:
     
     stats = state.get("stats", {})
     print(f"processed: {processed}")
-    cursor = stats.get("cursor")
-    if cursor is not None:
-        print(f"cursor={cursor} completed={stats.get('completed', 0)} failed={stats.get('failed', 0)}")
-    else:
-        print(f"queue={stats.get('queue', 0)} completed={stats.get('completed', 0)} failed={stats.get('failed', 0)}")
+    print(f"queue={stats.get('queue', 0)} completed={stats.get('completed', 0)} failed={stats.get('failed', 0)}")
     
     return 0
 
@@ -311,13 +279,6 @@ def _default_config() -> Dict[str, str]:
 
 def _new_run_id() -> str:
     return uuid.uuid4().hex[:8]
-
-
-def _should_stream(path: Path) -> bool:
-    try:
-        return path.stat().st_size >= 2_000_000
-    except OSError:
-        return False
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -458,7 +419,6 @@ def _prepare_run_wizard_args(args: argparse.Namespace) -> bool:
     args.concurrency = _prompt_int("并发数", int(args.concurrency), 1, 8)
     args.batch_size = _prompt_int("批大小", int(args.batch_size), 1, 10)
     args.max_wait = _prompt_int("单次最大等待秒", int(args.max_wait), 60, 7200)
-    args.ordered = _prompt_yes_no("使用有序流式模式(ordered)", bool(args.ordered))
     args.interactive = _prompt_yes_no("继续用数字选择 region/universe/neutralization", True)
     return True
 
