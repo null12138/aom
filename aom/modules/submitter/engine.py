@@ -226,6 +226,20 @@ def _process_batch(batch: List[Dict[str, Any]], adapter: SubmissionAdapter, stat
         if on_progress: on_progress({"status": "SUBMITTING", "expression": f"正在向 API 提交 {len(batch)} 个回测任务..."})
         
         results = adapter.submit_multiple(batch, stop_event=stop_event, on_heartbeat=hb)
+        if len(results) != len(batch):
+            mismatch_msg = (
+                f"batch result count mismatch: expected {len(batch)} got {len(results)}"
+            )
+            logger.error(mismatch_msg)
+            print(f"\033[1;33m[WARN]\033[0m {mismatch_msg}")
+            if len(results) < len(batch):
+                missing = len(batch) - len(results)
+                results = list(results) + [
+                    SubmissionResult("", "failed", {"error": mismatch_msg})
+                    for _ in range(missing)
+                ]
+            else:
+                results = list(results)[: len(batch)]
         
         # 1. 第一步：仅更新内存状态，锁的范围最小化
         with _state_lock:

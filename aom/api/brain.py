@@ -239,6 +239,7 @@ class BrainClient:
 
     def simulate_multiple(self, payload: Any, max_wait: int = 1800, stop_event: Optional[threading.Event] = None, on_heartbeat: Optional[Callable[[int], None]] = None) -> List[SimulationOutcome]:
         """支持并发获取结果的多重回测"""
+        expected_count = len(payload) if isinstance(payload, list) else 1
         resp = self.start_simulation(payload)
         loc = resp.headers.get("Location") or resp.headers.get("location")
         if not loc: raise BrainApiError("missing location header")
@@ -271,6 +272,12 @@ class BrainClient:
             # 最后的保命检查：如果确实没拿到 ID，报错让上层重试或降级
             raise BrainApiError(
                 f"Multiple simulation produced no alpha IDs. Status: {progress.get('status')} | simulation_id={parent_sim_id}"
+            )
+        if len(alpha_ids) != expected_count:
+            # 强制触发上层降级到逐条提交，避免“少返回结果”导致任务被静默丢弃。
+            raise BrainApiError(
+                "Multiple simulation returned mismatched alpha count: "
+                f"expected={expected_count}, got={len(alpha_ids)} | simulation_id={parent_sim_id}"
             )
 
         # 并发获取所有 Alpha 的详细指标，极大缩短心跳停止后的卡顿
